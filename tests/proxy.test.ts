@@ -128,7 +128,18 @@ async function createHarness(args: {
     },
     async close() {
       await proxy.close();
-      rmSync(directory, { recursive: true, force: true });
+      // The server may still be appending latest.json after the client read
+      // the body; retry briefly instead of racing that write (Node 20's
+      // rmSync fails with ENOTEMPTY when a file appears mid-removal).
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        try {
+          rmSync(directory, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (attempt === 9) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
     }
   };
 }

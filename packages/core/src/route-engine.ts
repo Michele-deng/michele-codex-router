@@ -90,7 +90,6 @@ export class RouteEngine {
             () => reject(new RouteError("Decision exceeded " + budget + "ms", "DECISION_TIMEOUT")),
             budget
           );
-          timer.unref?.();
         })
       ]);
     } finally {
