@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "test": "npm run build && node scripts/run-tests.mjs",
     "typecheck": "tsc -b --pretty false",
     "health": "npm run build && node apps/jev-cli/dist/index.js health",
     "setup:key": "npm run build && node apps/jev-cli/dist/index.js setup-key"
