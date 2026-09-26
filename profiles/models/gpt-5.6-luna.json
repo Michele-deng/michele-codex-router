@@ -1,0 +1,13 @@
+{
+  "providerId": "openai",
+  "modelId": "gpt-5.6-luna",
+  "profileVersion": "2026-09-25.1",
+  "updatedAt": "2026-09-25T20:30:00+08:00",
+  "static": {
+    "tier": "low",
+    "contextLimit": 128000,
+    "supportsTools": true,
+    "strengths": ["simple questions", "mechanical edits", "fast responses"],
+    "constraints": ["not intended for architecture", "limited deep reasoning"]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "providerId": "openai",
+  "modelId": "gpt-6-astra",
+  "profileVersion": "2026-09-25.1",
+  "updatedAt": "2026-09-25T20:30:00+08:00",
+  "static": {
+    "tier": "frontier",
+    "contextLimit": 272000,
+    "supportsTools": true,
+    "strengths": ["hardest architecture", "ambiguous research", "high-risk tradeoffs"],
+    "constraints": ["highest expected cost", "disabled unless long tier is enabled"]
+  }
+}

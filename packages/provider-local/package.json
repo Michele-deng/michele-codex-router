@@ -1,0 +1,13 @@
+{
+  "name": "@jev-router/provider-local",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@jev-router/core": "0.1.0"
+  }
+}

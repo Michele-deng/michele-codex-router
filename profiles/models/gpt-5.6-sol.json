@@ -1,0 +1,13 @@
+{
+  "providerId": "openai",
+  "modelId": "gpt-5.6-sol",
+  "profileVersion": "2026-09-25.1",
+  "updatedAt": "2026-09-25T20:30:00+08:00",
+  "static": {
+    "tier": "high",
+    "contextLimit": 272000,
+    "supportsTools": true,
+    "strengths": ["complex implementation", "cross-file reasoning", "debugging", "code review"],
+    "constraints": ["more expensive than routine tiers"]
+  }
+}

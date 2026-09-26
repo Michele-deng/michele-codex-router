@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../dist/tests"
+  },
+  "include": ["**/*.ts"],
+  "references": [
+    { "path": "../packages/core" },
+    { "path": "../packages/config" },
+    { "path": "../packages/provider-typesafe" },
+    { "path": "../packages/provider-deepseek" },
+    { "path": "../packages/mcp" },
+    { "path": "../adapters/codex" }
+  ]
+}

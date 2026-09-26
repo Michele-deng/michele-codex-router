@@ -1,0 +1,14 @@
+{
+  "name": "@jev-router/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@jev-router/config": "0.1.0",
+    "@jev-router/core": "0.1.0"
+  }
+}

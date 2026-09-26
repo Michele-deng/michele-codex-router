@@ -1,0 +1,20 @@
+{
+  "name": "@jev-router/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "jev": "dist/index.js",
+    "jev-codex": "dist/index.js"
+  },
+  "dependencies": {
+    "@jev-router/adapter-codex": "0.1.0",
+    "@jev-router/config": "0.1.0",
+    "@jev-router/core": "0.1.0",
+    "@jev-router/mcp": "0.1.0",
+    "@jev-router/provider-local": "0.1.0",
+    "@jev-router/provider-deepseek": "0.1.0",
+    "@jev-router/provider-openai": "0.1.0",
+    "@jev-router/provider-typesafe": "0.1.0"
+  }
+}

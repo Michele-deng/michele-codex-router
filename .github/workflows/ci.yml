@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for leaked secrets and personal paths
+        run: |
+          set -e
+          if rg -n -g '!tests/**' -g '!package-lock.json' 'sk-[A-Za-z0-9_-]{20,}|glpat-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{36}|xoxb-[A-Za-z0-9-]{20,}' .; then
+            echo 'Possible secret found (tests/ and lockfile whitelisted).'
+            exit 1
+          fi
+          # This workflow file contains the pattern itself, so exclude it.
+          if rg -n -g '!package-lock.json' -g '!.github/workflows/ci.yml' 'dxy62|D:\\Jev-Router' .; then
+            echo 'Personal path found in tracked files.'
+            exit 1
+          fi
+          echo 'Clean.'

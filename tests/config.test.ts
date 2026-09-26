@@ -1,0 +1,130 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { describe, it } from "node:test";
+import {
+  describeConfig,
+  loadEnvFile,
+  loadJevConfig,
+  parseBoolean,
+  parseInteger,
+  redactDeep,
+  redactText
+} from "@jev-router/config";
+
+const missingEnvFile = (): string => path.join(os.tmpdir(), "jev-router-no-such-file", ".env");
+
+describe("loadEnvFile", () => {
+  it("keeps real environment variables ahead of the dotenv file", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "jev-router-env-"));
+    const envFile = path.join(directory, ".env");
+    writeFileSync(envFile, "JEV_TEST_ALPHA=from-file\nJEV_TEST_BETA=from-file\n", "utf8");
+    process.env.JEV_TEST_ALPHA = "from-real-env";
+    delete process.env.JEV_TEST_BETA;
+
+    try {
+      const result = loadEnvFile(envFile);
+      assert.equal(process.env.JEV_TEST_ALPHA, "from-real-env");
+      assert.equal(process.env.JEV_TEST_BETA, "from-file");
+      assert.deepEqual(result.keysApplied, ["JEV_TEST_BETA"]);
+      assert.deepEqual(result.keysAlreadySet, ["JEV_TEST_ALPHA"]);
+    } finally {
+      delete process.env.JEV_TEST_ALPHA;
+      delete process.env.JEV_TEST_BETA;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing environment file instead of failing", () => {
+    const result = loadEnvFile(missingEnvFile());
+    assert.equal(result.found, false);
+    assert.deepEqual(result.keysApplied, []);
+    assert.deepEqual(result.keysAlreadySet, []);
+  });
+});
+
+describe("loadJevConfig", () => {
+  it("derives typed settings from environment values", () => {
+    const config = loadJevConfig({
+      projectRoot: os.tmpdir(),
+      envFile: missingEnvFile(),
+      env: {
+        JEV_ROUTE_TIMEOUT_MS: "1500",
+        JEV_ALLOW_LONG: "true",
+        JEV_FALLBACK_MODEL: "deepseek/deepseek-flash",
+        JEV_DECISION_PROVIDER: "static",
+        TYPESAFE_API_KEY: "sk-test-0123456789"
+      }
+    });
+
+    assert.equal(config.routeTimeoutMs, 1500);
+    assert.equal(config.allowLongTier, true);
+    assert.equal(config.decisionProvider, "static");
+    assert.equal(config.typesafe.configured, true);
+    assert.equal(config.fallback.modelId, "deepseek/deepseek-flash");
+    assert.equal(config.readSecret("typesafeApiKey"), "sk-test-0123456789");
+  });
+
+  it("falls back to defaults when nothing is configured", () => {
+    const config = loadJevConfig({ projectRoot: os.tmpdir(), envFile: missingEnvFile(), env: {} });
+    assert.equal(config.routeTimeoutMs, 800);
+    assert.equal(config.allowLongTier, false);
+    assert.equal(config.decisionProvider, "typesafe");
+    assert.equal(config.typesafe.configured, false);
+    assert.equal(config.fallback.modelId, undefined);
+    assert.equal(config.codex.upstreamUrl, "https://api.openai.com/v1/responses");
+  });
+
+  it("never exposes secrets in the safe view or when serialized", () => {
+    const typesafeKey = "sk-live-abcdefghijklmnop1234567890";
+    const deepseekKey = "ds-live-abcdefghijklmnop1234567890";
+    const config = loadJevConfig({
+      projectRoot: os.tmpdir(),
+      envFile: missingEnvFile(),
+      env: { TYPESAFE_API_KEY: typesafeKey, DEEPSEEK_API_KEY: deepseekKey }
+    });
+
+    assert.equal(config.typesafe.configured, true);
+    const safe = JSON.stringify(describeConfig(config));
+    assert.equal(safe.includes(typesafeKey), false);
+    assert.equal(safe.includes(deepseekKey), false);
+    assert.equal(JSON.stringify(config).includes(typesafeKey), false);
+    assert.equal(JSON.stringify(config).includes(deepseekKey), false);
+  });
+});
+
+describe("redaction", () => {
+  it("removes secret values from text and nested objects", () => {
+    const secret = "sk-abcdefghijklmnop1234567890";
+    const text = redactText(`authorization=Bearer ${secret}`, [secret]);
+    assert.equal(text.includes(secret), false);
+    assert.ok(text.includes("***"));
+
+    const nested = redactDeep({ headers: { authorization: secret }, note: secret }, [secret]);
+    assert.equal(JSON.stringify(nested).includes(secret), false);
+  });
+
+  it("redacts values of secret-shaped keys even without a known value list", () => {
+    const nested = redactDeep({ DEEPSEEK_API_KEY: "some-new-secret-value" }, []) as Record<string, unknown>;
+    assert.equal(nested.DEEPSEEK_API_KEY, "***");
+  });
+});
+
+describe("parsing", () => {
+  it("parses booleans explicitly", () => {
+    assert.equal(parseBoolean("1"), true);
+    assert.equal(parseBoolean("TRUE"), true);
+    assert.equal(parseBoolean("off"), false);
+    assert.equal(parseBoolean("maybe", true), true);
+    assert.equal(parseBoolean(undefined), false);
+  });
+
+  it("only accepts integers inside the allowed range", () => {
+    assert.equal(parseInteger("2400", 800), 2400);
+    assert.equal(parseInteger("nope", 800), 800);
+    assert.equal(parseInteger("5", 800, { min: 50 }), 800);
+    assert.equal(parseInteger("90000", 800, { max: 60_000 }), 800);
+    assert.equal(parseInteger(undefined, 800), 800);
+  });
+});

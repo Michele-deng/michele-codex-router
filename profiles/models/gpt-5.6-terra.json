@@ -1,0 +1,13 @@
+{
+  "providerId": "openai",
+  "modelId": "gpt-5.6-terra",
+  "profileVersion": "2026-09-25.1",
+  "updatedAt": "2026-09-25T20:30:00+08:00",
+  "static": {
+    "tier": "medium",
+    "contextLimit": 128000,
+    "supportsTools": true,
+    "strengths": ["bounded implementation", "known bug fixes", "tests", "routine refactors"],
+    "constraints": ["may struggle with broad architecture", "avoid for high-impact distributed design"]
+  }
+}

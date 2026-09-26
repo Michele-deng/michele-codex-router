@@ -1,0 +1,40 @@
+{
+  "name": "jev-router-workspace",
+  "version": "0.1.0",
+  "description": "Michele-Codex Model Router - Jev router / model fallback proxy for OpenAI Codex (Windows)",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "llm-router",
+    "model-routing",
+    "openai",
+    "proxy",
+    "jev",
+    "model-fallback"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Michele-deng/michele-codex-router.git"
+  },
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "adapters/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "typecheck": "tsc -b --pretty false",
+    "health": "npm run build && node apps/jev-cli/dist/index.js health",
+    "setup:key": "npm run build && node apps/jev-cli/dist/index.js setup-key"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

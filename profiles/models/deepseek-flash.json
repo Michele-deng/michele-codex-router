@@ -1,0 +1,21 @@
+{
+  "providerId": "deepseek",
+  "modelId": "deepseek/deepseek-flash",
+  "profileVersion": "2026-09-26.1",
+  "updatedAt": "2026-09-26T19:30:00+08:00",
+  "static": {
+    "tier": "medium",
+    "contextLimit": 1000000,
+    "supportsTools": true,
+    "strengths": [
+      "fast responses",
+      "long context",
+      "low cost",
+      "tool calling"
+    ],
+    "constraints": [
+      "routed through the configured DeepSeek-compatible endpoint",
+      "pricing must be confirmed from the actual account before calibration"
+    ]
+  }
+}

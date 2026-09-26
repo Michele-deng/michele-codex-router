@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/mcp" },
+    { "path": "../../packages/provider-local" },
+    { "path": "../../packages/provider-deepseek" },
+    { "path": "../../packages/provider-openai" },
+    { "path": "../../packages/provider-typesafe" },
+    { "path": "../../adapters/codex" }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@jev-router/adapter-codex",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@jev-router/core": "0.1.0",
+    "@jev-router/provider-typesafe": "0.1.0"
+  }
+}
