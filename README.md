@@ -40,6 +40,24 @@ You -> jev-codex launcher / desktop app
   summary + a 4,000-char context summary — never your code, tool output,
   auth headers, or keys. Decision hard-timeout (default 800ms) fails open.
 
+## What you gain (and what we honestly don't claim yet)
+
+- **The decision layer is dirt cheap by design.** Jev (`jev-latest` via
+  TypeSafe System One) is a *classification* model, not a text generator: it
+  reads a bounded task summary (≤8k chars) and returns a typed pick +
+  confidence probabilities. No completion tokens, no long output — think of
+  it as a sorter that costs a tiny fraction of a chat turn, not a writer.
+- **Most turns never need your most expensive model.** Everyday work is
+  lopsided — explanations, small fixes, docs, routine edits. Jev Auto sends
+  those to cheap/fast models and reserves frontier models for turns that
+  actually need them; a low-confidence pick is never allowed to downgrade
+  the tier you are already on.
+- **We don't ship invented savings numbers.** Real savings depend on your
+  workload. Every turn records model / tier / confidence / switch reason to
+  `~/.jev-router/decisions.jsonl` (`jev explain` prints the latest one),
+  and `evals/` holds a 30-task benchmark you can run before and after real
+  usage to compare cost vs. quality yourself.
+
 ## Requirements
 
 - Windows 10/11 (only platform tested; Startup-folder and PowerShell logic
