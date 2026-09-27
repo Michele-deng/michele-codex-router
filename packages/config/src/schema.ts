@@ -6,6 +6,7 @@ import { redactText } from "./secrets.js";
 
 export type DecisionProviderKind = "typesafe" | "local" | "static";
 export type PrivacyMode = "cloud" | "local-routing" | "local-only";
+export type DecisionPolicy = "auto" | "always" | "rules";
 
 export type SecretName = "typesafeApiKey" | "deepseekApiKey" | "openaiApiKey";
 
@@ -26,7 +27,7 @@ export interface JevConfig {
     baseUrl: string | undefined;
     wireApi: "responses" | "chat";
   };
-  codex: { upstreamUrl: string };
+  codex: { upstreamUrl: string | undefined };
   codexBin: string | undefined;
   probes: {
     openaiBaseUrl: string | undefined;
@@ -40,6 +41,7 @@ export interface JevConfig {
   proxyPort: number;
   sentinelModels: string[];
   adjustReasoning: boolean;
+  decisionPolicy: DecisionPolicy;
   profilesDirectory: string;
   dataDirectory: string;
   readSecret(name: SecretName): string | undefined;
@@ -59,9 +61,9 @@ export function loadJevConfig(options: JevConfigOptions = {}): JevConfig {
 
   const typesafeApiKey = optionalString(env.TYPESAFE_API_KEY) ?? optionalString(env.JEV_API_KEY);
   const deepseekBaseUrl = optionalString(env.DEEPSEEK_BASE_URL);
-  const profilesDirectory =
-    optionalString(env.JEV_PROFILES_DIR) ?? path.join(projectRoot, "profiles", "models");
   const dataDirectory = optionalString(env.JEV_DATA_DIR) ?? path.join(os.homedir(), ".jev-router");
+  const profilesDirectory =
+    optionalString(env.JEV_PROFILES_DIR) ?? path.join(dataDirectory, "profiles");
 
   const readSecret = (name: SecretName): string | undefined => {
     if (name === "typesafeApiKey") return optionalString(env.TYPESAFE_API_KEY) ?? optionalString(env.JEV_API_KEY);
@@ -98,7 +100,7 @@ export function loadJevConfig(options: JevConfigOptions = {}): JevConfig {
       wireApi: parseEnum<"responses" | "chat">(env.DEEPSEEK_WIRE_API, ["responses", "chat"], "responses")
     },
     codex: {
-      upstreamUrl: optionalString(env.JEV_CODEX_UPSTREAM_URL) ?? "https://api.openai.com/v1/responses"
+      upstreamUrl: optionalString(env.JEV_CODEX_UPSTREAM_URL)
     },
     codexBin: optionalString(env.JEV_CODEX_BIN),
     probes: {
@@ -116,6 +118,11 @@ export function loadJevConfig(options: JevConfigOptions = {}): JevConfig {
     proxyPort: parseInteger(env.JEV_PROXY_PORT, 10300, { min: 1024, max: 65535 }),
     sentinelModels: parseList(env.JEV_SENTINEL_MODELS, ["jev-router", "jev/auto"]),
     adjustReasoning: parseBoolean(env.JEV_ADJUST_REASONING, true),
+    decisionPolicy: parseEnum<DecisionPolicy>(
+      env.JEV_DECISION_POLICY,
+      ["auto", "always", "rules"],
+      "auto"
+    ),
     profilesDirectory,
     dataDirectory,
     readSecret
@@ -142,7 +149,7 @@ export interface SafeJevConfig {
   deepseekConfigured: boolean;
   deepseekBaseUrl: string | null;
   deepseekWireApi: "responses" | "chat";
-  codexUpstreamUrl: string;
+  codexUpstreamUrl: string | null;
   codexBin: string | null;
   privacyMode: PrivacyMode;
   allowLongTier: boolean;
@@ -150,6 +157,7 @@ export interface SafeJevConfig {
   proxyPort: number;
   sentinelModels: string[];
   adjustReasoning: boolean;
+  decisionPolicy: DecisionPolicy;
   profilesDirectory: string;
   dataDirectory: string;
 }
@@ -174,7 +182,7 @@ export function describeConfig(config: JevConfig): SafeJevConfig {
     deepseekConfigured: config.deepseek.configured,
     deepseekBaseUrl: config.deepseek.baseUrl ? redactText(config.deepseek.baseUrl) : null,
     deepseekWireApi: config.deepseek.wireApi,
-    codexUpstreamUrl: config.codex.upstreamUrl,
+    codexUpstreamUrl: config.codex.upstreamUrl ?? null,
     codexBin: config.codexBin ?? null,
     privacyMode: config.privacyMode,
     allowLongTier: config.allowLongTier,
@@ -182,6 +190,7 @@ export function describeConfig(config: JevConfig): SafeJevConfig {
     proxyPort: config.proxyPort,
     sentinelModels: config.sentinelModels,
     adjustReasoning: config.adjustReasoning,
+    decisionPolicy: config.decisionPolicy,
     profilesDirectory: config.profilesDirectory,
     dataDirectory: config.dataDirectory
   };

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CapabilityProfile } from "./types.js";
 
@@ -12,6 +12,7 @@ export type FailureKind =
   | "timeout"
   | "network"
   | "config"
+  | "request_invalid"
   | "unknown";
 
 export interface ExecutionFailure {
@@ -80,6 +81,12 @@ export function classifyHttpFailure(status: number, bodyText = ""): ExecutionFai
     if (/api[_ ]?key|unauthorized|authentication|permission|forbidden/.test(lower)) {
       return { kind: "auth", retryable: true, status, message };
     }
+    // Content-level errors (context overflow, bad parameter) are NOT model
+    // failures: switching models may help, but they must never count toward
+    // cooldowns or the three-strikes permanent disable.
+    if (!/model[_ ]?not[_ ]?found|unknown model|no such model|does not exist|unsupported|insufficient[_ ]?quota|not supported|no available (channel|route)/.test(lower)) {
+      return { kind: "request_invalid", retryable: true, status, message };
+    }
     return { kind: "config", retryable: true, status, message };
   }
   return { kind: "unknown", retryable: false, status, message };
@@ -117,6 +124,7 @@ function extractErrorMessage(bodyText: string): string | undefined {
  */
 export class ModelHealthStore {
   private readonly records = new Map<string, ModelHealthRecord>();
+  private loadedMtimeMs = 0;
 
   constructor(private readonly directory?: string) {}
 
@@ -129,19 +137,47 @@ export class ModelHealthStore {
     try {
       const raw = await readFile(this.healthPath, "utf8");
       const parsed = JSON.parse(raw) as ModelHealthRecord[];
+      // Full replace so deletions from other processes (health-reset) apply.
+      this.records.clear();
       for (const record of parsed) {
         if (record && typeof record.providerId === "string" && typeof record.modelId === "string") {
           this.records.set(ModelHealthStore.key(record.providerId, record.modelId), record);
         }
       }
+      this.loadedMtimeMs = (await stat(this.healthPath)).mtimeMs;
     } catch {
       // Missing or corrupt state simply starts fresh.
+    }
+  }
+
+  /**
+   * Hot reload for long-running services: picks up health-reset (or manual
+   * edits) written by other processes on the next routing decision.
+   */
+  async syncFromDisk(): Promise<void> {
+    if (!this.directory) return;
+    try {
+      const info = await stat(this.healthPath);
+      if (info.mtimeMs !== this.loadedMtimeMs) await this.load();
+    } catch {
+      // No file yet; in-memory state stays authoritative.
     }
   }
 
   recordFailure(profile: CapabilityProfile, failure: ExecutionFailure, now = Date.now()): ModelHealthRecord {
     const providerId = profile.providerId ?? "openai";
     const key = ModelHealthStore.key(providerId, profile.modelId);
+    // Request-level problems (bad params, context overflow) are not model
+    // faults: never counted, never cooled down, never permanently disabled.
+    if (failure.kind === "request_invalid") {
+      return this.records.get(key) ?? {
+        providerId,
+        modelId: profile.modelId,
+        available: true,
+        consecutiveFailures: 0,
+        lastCheckedAt: new Date(now).toISOString()
+      };
+    }
     const previous = this.records.get(key);
     const consecutiveFailures = (previous?.consecutiveFailures ?? 0) + 1;
     // "config"/"not_found" means the account or channel cannot serve this

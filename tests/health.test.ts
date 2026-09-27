@@ -150,6 +150,41 @@ describe("ModelHealthStore", () => {
     }
   });
 
+  it("never counts request-content errors as model faults", () => {
+    const store = new ModelHealthStore();
+    const model = profile("content-error-model", "medium");
+    const failure = classifyHttpFailure(400, "context length exceeded");
+    assert.equal(failure.kind, "request_invalid");
+    for (let i = 0; i < 10; i += 1) store.recordFailure(model, failure, 1_000 + i);
+    assert.equal(store.isPermanentlyDisabled(model), false);
+    assert.equal(store.isCoolingDown(model, 10_000), false);
+    assert.equal(store.get("openai", "content-error-model"), undefined);
+  });
+
+  it("hot reloads health state written by other processes", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "jev-health-hot-"));
+    try {
+      const service = new ModelHealthStore(directory);
+      const model = profile("hot-model", "medium");
+      const failure = classifyHttpFailure(400, "model not supported");
+      for (let i = 0; i < 3; i += 1) service.recordFailure(model, failure, 1_000 + i);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await service.syncFromDisk();
+      assert.equal(service.isPermanentlyDisabled(model), true);
+
+      const cli = new ModelHealthStore(directory);
+      await cli.load();
+      assert.equal(cli.reset(), 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      await service.syncFromDisk();
+      assert.equal(service.isPermanentlyDisabled(model), false, "reset applies to the running service");
+      assert.equal(service.isCoolingDown(model), false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("persists and reloads health state", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "jev-health-"));
     try {

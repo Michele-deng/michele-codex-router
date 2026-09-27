@@ -40,23 +40,28 @@ You -> jev-codex launcher / desktop app
   summary + a 4,000-char context summary — never your code, tool output,
   auth headers, or keys. Decision hard-timeout (default 800ms) fails open.
 
-## What you gain (and what we honestly don't claim yet)
+## What you gain — honestly, it depends on your pool
 
-- **The decision layer is dirt cheap by design.** Jev (`jev-latest` via
-  TypeSafe System One) is a *classification* model, not a text generator: it
-  reads a bounded task summary (≤8k chars) and returns a typed pick +
-  confidence probabilities. No completion tokens, no long output — think of
-  it as a sorter that costs a tiny fraction of a chat turn, not a writer.
-- **Most turns never need your most expensive model.** Everyday work is
-  lopsided — explanations, small fixes, docs, routine edits. Jev Auto sends
-  those to cheap/fast models and reserves frontier models for turns that
-  actually need them; a low-confidence pick is never allowed to downgrade
-  the tier you are already on.
-- **We don't ship invented savings numbers.** Real savings depend on your
-  workload. Every turn records model / tier / confidence / switch reason to
-  `~/.jev-router/decisions.jsonl` (`jev explain` prints the latest one),
-  and `evals/` holds a 30-task benchmark you can run before and after real
-  usage to compare cost vs. quality yourself.
+- **Wide pool (3+ tiers): cost potential.** Most turns are lopsided —
+  explanations, small fixes, docs. The router sends those to cheap/fast
+  models and reserves expensive ones for turns that need them. That is where
+  savings can come from.
+- **Narrow pool (2 tiers, e.g. flash/pro): quality, not savings.** If you are
+  already on the cheap model there is nothing to save; the router's job is
+  upgrading hard turns to the strong model. We do not promise cost savings
+  here and will not pretend otherwise.
+- **What the decision costs.** With `auto` policy the decision layer is only
+  contacted when the candidate pool has **3+ distinct tiers**; small pools are
+  decided locally by rules (zero cost, zero latency, zero third party). When
+  Jev (`jev-latest` via TypeSafe System One — a *classification* model, no
+  completion tokens) is used, it receives a bounded summary (≤8k chars task
+  + ≤4k chars context scale) and answers within a hard deadline (default
+  800ms, then fail-open to rules).
+- **You can measure instead of believing.** Every turn records
+  model / tier / confidence / switch reason / `decisionSource`
+  (`rules` or `jev`) to `~/.jev-router/decisions.jsonl` —
+  `jev explain` prints the latest one, and `evals/` holds a 30-task
+  benchmark for before/after comparison.
 
 ## Requirements
 
@@ -137,10 +142,42 @@ All commands run as `node apps\jev-cli\dist\index.js <command>` (shown as
 | `jev route [--model ID] <task>` | Print one routing decision |
 | `jev profiles` | List model profiles |
 | `jev health` | Config + model health, never prints secrets |
-| `jev health-reset [modelId]` | Clear permanently-disabled health records |
+| `jev health-reset [modelId]` | Clear permanently-disabled health records (hot-applies) |
+| `jev doctor` | Detect your upstream, list its models, generate model profiles |
 | `jev explain` | Latest decision with attempt chain |
 | `jev desktop enable / status / disable` | Manage desktop integration |
 | `jev mcp` | Optional MCP decision service (not core) |
+
+## Configure it for your own provider
+
+`jev doctor` does the heavy lifting; run it again whenever your models change:
+
+```powershell
+node apps\jev-cli\dist\index.js doctor
+```
+
+It reads the provider wiring already present in your `config.toml` (a custom
+provider block with `experimental_bearer_token`/`requires_openai_auth`, or
+the root `openai_base_url`), probes `GET /models`, and writes one model
+profile per model into `~/.jev-router/profiles/`. If the probe fails and no
+profiles exist, `desktop enable` refuses to install and lists exactly what
+is missing — it never takes over and breaks your current setup.
+
+- Tier is guessed from the model name (`pro/high/max` → high,
+  `flash/mini/nano` → low, else medium); context comes from the model list
+  when provided, otherwise 128k. Profiles say `auto-generated` — edit
+  `~/.jev-router/profiles/<model>.json` to calibrate tier/context.
+- Auth: the injected `jev_router` provider copies your upstream's auth style
+  (bearer token / `requires_openai_auth`), so OpenAI credentials are never
+  sent to non-OpenAI endpoints. Models without a profile pass through
+  untouched to your upstream.
+- Default upstream: whatever your config is wired to. `JEV_CODEX_UPSTREAM_URL`
+  overrides it; `desktop enable` fills it into `.env` only when empty.
+- Content-level errors (e.g. context overflow) are retried on the next
+  candidate but never blame the model — only account/channel rejections
+  (`model_not_found`, unsupported, quota) feed the cooldown and
+  three-strikes system. `jev health-reset` applies to a running service
+  immediately.
 
 ## Routing rules (priority order)
 
@@ -166,6 +203,7 @@ Full template: `.env.example`. Real environment variables beat `.env`,
 | `DEEPSEEK_BASE_URL` / `_KEY` | empty | separate DeepSeek-compatible endpoint/key |
 | `JEV_PROXY_PORT` | `10300` | fixed desktop proxy port |
 | `JEV_UPSTREAM_TIMEOUT_MS` | `60000` | upstream header deadline (below Codex's ~113s patience) |
+| `JEV_DECISION_POLICY` | `auto` | `auto` (rules for pools of ≤2 tiers, Jev at 3+), `always`, `rules` |
 | `JEV_ALLOW_LONG` | `0` | let frontier-tier models be candidates |
 
 ## Privacy & security
@@ -204,7 +242,7 @@ Full template: `.env.example`. Real environment variables beat `.env`,
 
 ## Testing
 
-- `npm test`: **61 unit/integration tests** — config precedence, secret
+- `npm test`: **76 unit/integration tests** — config precedence, secret
   redaction, error classification, cooldowns/three-strikes, decision
   timeout, SSE no-buffering, failover, session leases, manual bypass,
   loopback ports, injection/restore round trips.

@@ -11,6 +11,17 @@ export class StubDecisionProvider implements TypedDecisionProvider {
     return this.result;
   }
 }
+
+export class ScriptedJudge implements TypedDecisionProvider {
+  calls = 0;
+  constructor(private readonly results: RawRoutingJudgment[]) {}
+
+  async decide(): Promise<RawRoutingJudgment> {
+    const result = this.results[Math.min(this.calls, this.results.length - 1)];
+    this.calls += 1;
+    return result as RawRoutingJudgment;
+  }
+}
 export function judgment(selectedModelId: string, confidence = 0.9, tierScore = 0.5): RawRoutingJudgment {
   return { selectedModelId, confidence, probabilities: { [selectedModelId]: confidence }, factors: { taskType: "code_edit", complexity: tierScore, reasoningRequired: tierScore, toolComplexity: tierScore } };
 }

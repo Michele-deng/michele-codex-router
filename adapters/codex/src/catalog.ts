@@ -73,9 +73,13 @@ function buildSentinelEntry(entries: Array<Record<string, unknown>>): Record<str
     description: "Jev-Router：每轮自动选择最合适的模型；选择具体模型即暂停路由。",
     default_reasoning_level: "low",
     supported_reasoning_levels: levels.length > 0 ? levels : template.supported_reasoning_levels,
-    context_window: 272_000,
-    max_context_window: 272_000,
-    auto_compact_token_limit: 258_400,
+    context_window: typeof template.context_window === "number" ? template.context_window : 272_000,
+    max_context_window:
+      typeof template.max_context_window === "number" ? template.max_context_window : 272_000,
+    auto_compact_token_limit:
+      typeof template.auto_compact_token_limit === "number"
+        ? template.auto_compact_token_limit
+        : 258_400,
     supported_in_api: true,
     visibility: "list"
   };

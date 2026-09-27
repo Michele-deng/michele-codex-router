@@ -45,6 +45,8 @@ export interface RoutePreferences {
   explicitModelId?: string;
   currentModelId?: string;
   estimatedInputTokens?: number;
+  conversationItems?: number;
+  toolCalls?: number;
   longTierEnabled?: boolean;
 }
 
@@ -74,6 +76,8 @@ export interface RouteDecision {
   turnId?: string;
   /** Why the route changed: new_task, technical_failure, manual_override or fallback. */
   switchReason?: string;
+  /** Who made the pick: the rules engine, Jev, or an explicit user choice. */
+  decisionSource?: "rules" | "jev" | "manual";
   fallback?: {
     reason: string;
     originalModelId?: string;

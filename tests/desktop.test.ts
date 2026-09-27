@@ -215,7 +215,7 @@ describe("model catalog merge", () => {
       assert.equal(merged.models.length, 3);
       const sentinel = merged.models.find((entry) => entry.slug === SENTINEL_MODEL_ID);
       assert.ok(sentinel);
-      assert.equal(sentinel.context_window, 272_000);
+      assert.equal(sentinel.context_window, 1_000_000, "inherits the template entry's context window");
       assert.equal(sentinel.supported_in_api, true);
       assert.deepEqual(
         (sentinel.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),

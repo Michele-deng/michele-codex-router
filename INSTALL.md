@@ -46,6 +46,19 @@ table instead of improvising. Never print, log, or repeat secret values.
    `"not found"`), `"proxyPort": 10300`, and
    `"typesafeKeyConfigured"` reflects whether the human filled the key.
 
+3b. Let the router adapt to this machine (detects the user's upstream,
+    probes `GET /models`, generates one model profile per model):
+
+   ```powershell
+   node apps\jev-cli\dist\index.js doctor
+   ```
+
+   Expect: `"ok": true` with `"profilesGenerated"` > 0 and
+   `"issues": []`. If `ok` is false, report the issue strings verbatim and
+   stop: `desktop enable` would refuse anyway. Profiles land in
+   `~\.jev-router\profiles\`; the user can edit them later to calibrate
+   tier/context limits.
+
 4. Wire the Codex desktop app (modifies files, see "What this changes" below):
 
    ```powershell
@@ -115,6 +128,8 @@ deliberately never rolls back Codex's own changes.
 | `spawn codex.exe ENOENT` | Codex is not on PATH; the launcher auto-detects `%LOCALAPPDATA%\OpenAI\Codex\bin`. If it still fails, set `JEV_CODEX_BIN=` in `.env` to the full path of `codex.exe`. |
 | `Port 10300 is used by another service` | Set `JEV_PROXY_PORT=` in `.env` to a free port, then re-run `desktop enable`. |
 | `Model catalog source not found` | Start opencodex (or Codex once) so `opencodex-catalog.json` exists, then re-run `desktop enable`. |
+| `no model profiles; run: ... doctor` | Run `node apps\jev-cli\dist\index.js doctor`; if it fails, the upstream endpoint/credentials are missing (the report says which). |
+| `model list probe failed` (doctor warning) | The endpoint did not answer `GET /models`. Fix the endpoint or copy/adapt the examples in `profiles/examples`, then re-run doctor. |
 | `authentication_error` / `401` from the decision API | Wrong key or wrong endpoint: fix `TYPESAFE_API_KEY` / `JEV_TYPESAFE_ENDPOINT` in `.env`, re-run `npm run health`. |
 | `Decision timed out after ...ms` in `jev explain` | Normal fail-open: the request still completed on a fallback model. If frequent, raise `JEV_ROUTE_TIMEOUT_MS` (default on slow relays: 4000). |
 | `model_router_error` / `502` in Codex | Run `desktop status`; if `ok` is true, check the tail of `~\.jev-router\desktop-service.log` and the `attemptChain` in `~\.jev-router/decisions.jsonl`. |
@@ -122,6 +137,12 @@ deliberately never rolls back Codex's own changes.
 | `Unknown model jev-router is used` warning | Expected cosmetic warning for the CLI sentinel model; desktop uses `jev/auto` which has catalog metadata. |
 | `WARNING: TERM is set to "dumb"` prompt | Interactive terminal quirk: press `y` + Enter. |
 | Desktop routing not active after reboot | Run `desktop status`; if the startup entry is missing, re-run `desktop enable`. |
+
+Note on failures: content-level errors (bad params, context overflow) are
+retried on another candidate but never count against a model. Only
+account/channel rejections feed cooldowns and the three-strikes permanent
+disable; `health-reset` clears those and applies to a running service
+immediately.
 
 ## Uninstall
 

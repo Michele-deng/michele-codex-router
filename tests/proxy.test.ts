@@ -16,7 +16,7 @@ import {
   type CodexResponsesRequest,
   type ExecutionProvider
 } from "@jev-router/adapter-codex";
-import { StubDecisionProvider, judgment, profile } from "./fixtures.js";
+import { ScriptedJudge, StubDecisionProvider, judgment, profile } from "./fixtures.js";
 
 interface ProviderCall {
   request: CodexResponsesRequest;
@@ -62,7 +62,7 @@ interface Harness {
   proxy: CodexProxy;
   directory: string;
   health: ModelHealthStore;
-  judge: StubDecisionProvider;
+  judge: { calls: number };
   readLog(): Array<Record<string, any>>;
   waitForLog(count: number, timeoutMs?: number): Promise<Array<Record<string, any>>>;
   close(): Promise<void>;
@@ -78,16 +78,24 @@ async function createHarness(args: {
   adjustReasoning?: boolean;
   judgeTierScore?: number;
   headerTimeoutMs?: number;
+  decisionPolicy?: "auto" | "always" | "rules";
+  judgeProvider?: ScriptedJudge;
 }): Promise<Harness> {
   const directory = mkdtempSync(path.join(os.tmpdir(), "jev-proxy-"));
-  const judge = new StubDecisionProvider(
+  const judge = args.judgeProvider ?? new StubDecisionProvider(
     judgment(
       args.judgeModelId ?? args.candidates[0]?.modelId ?? "missing",
       0.9,
       args.judgeTierScore ?? 0.5
     )
   );
-  const engine = new RouteEngine(judge, args.fallbackModelId);
+  const engine = new RouteEngine(
+    judge,
+    args.fallbackModelId,
+    0.55,
+    undefined,
+    args.decisionPolicy ?? "always"
+  );
   const logger = new DecisionLogger(directory, false);
   const health = args.health ?? new ModelHealthStore();
   const proxy = await startCodexProxy({
@@ -701,6 +709,92 @@ describe("Codex proxy", () => {
       assert.equal((await response.text()).includes("bypassed"), true);
       assert.equal(openai.calls.length, 0, "disabled model is never dialled");
       assert.equal(deepseek.calls.length, 1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("protects the current tier through the real proxy path", async () => {
+    const candidates = [
+      profile("gpt-low", "low", { providerId: "openai" }),
+      profile("gpt-high", "high", { providerId: "openai" })
+    ];
+    const openai = new ScriptedProvider("openai", [
+      () => sseResponse([{ text: "data: one\n\n" }]),
+      () => sseResponse([{ text: "data: two\n\n" }])
+    ]);
+    const judge = new ScriptedJudge([
+      judgment("gpt-high", 0.9, 3),
+      judgment("gpt-low", 0.2, 0.2)
+    ]);
+    const harness = await createHarness({
+      candidates,
+      providers: [openai],
+      judgeProvider: judge
+    });
+
+    try {
+      const first = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        prompt_cache_key: "turn-a",
+        input: [{ role: "user", content: "hard work" }]
+      });
+      await first.text();
+      const second = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        prompt_cache_key: "turn-b",
+        input: [{ role: "user", content: "simple work" }]
+      });
+      await second.text();
+
+      assert.equal(judge.calls, 2, "one decision per turn");
+      assert.equal(openai.calls[0]?.request.model, "gpt-high");
+      assert.equal(
+        openai.calls[1]?.request.model,
+        "gpt-high",
+        "low-confidence pick must not downgrade the current tier"
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("switches on request-content errors without blaming the model", async () => {
+    const candidates = [
+      profile("gpt-high", "high", { providerId: "openai" }),
+      profile("deepseek/deepseek-flash", "medium", { providerId: "deepseek" })
+    ];
+    const openai = new ScriptedProvider("openai", [
+      jsonResponse(400, { error: { message: "context length exceeded" } })
+    ]);
+    const deepseek = new ScriptedProvider("deepseek", [
+      () => sseResponse([{ text: "data: recovered\n\n" }])
+    ]);
+    const health = new ModelHealthStore();
+    const harness = await createHarness({
+      candidates,
+      providers: [openai, deepseek],
+      judgeModelId: "gpt-high",
+      health
+    });
+
+    try {
+      const response = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        input: [{ role: "user", content: "huge context task" }]
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await response.text()).includes("recovered"), true);
+      assert.equal(
+        health.get("openai", "gpt-high"),
+        undefined,
+        "content errors never cool down a model"
+      );
+      const log = await harness.waitForLog(1);
+      assert.equal(log[0]?.attemptChain[0].failureKind, "request_invalid");
     } finally {
       await harness.close();
     }

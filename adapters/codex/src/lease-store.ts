@@ -5,6 +5,7 @@ interface Lease {
 
 export class ModelLeaseStore {
   private readonly leases = new Map<string, Lease>();
+  private lastUsedModelId?: string;
 
   constructor(private readonly ttlMs = 30 * 60 * 1_000) {}
 
@@ -16,10 +17,17 @@ export class ModelLeaseStore {
   set(key: string, modelId: string): void {
     this.cleanup();
     this.leases.set(key, { modelId, expiresAt: Date.now() + this.ttlMs });
+    this.lastUsedModelId = modelId;
+  }
+
+  /** The model most recently used in this proxy session (for tier protection). */
+  lastUsed(): string | undefined {
+    return this.lastUsedModelId;
   }
 
   clear(): void {
     this.leases.clear();
+    delete this.lastUsedModelId;
   }
 
   private cleanup(): void {

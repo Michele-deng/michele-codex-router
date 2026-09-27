@@ -73,7 +73,7 @@ describe("loadJevConfig", () => {
     assert.equal(config.decisionProvider, "typesafe");
     assert.equal(config.typesafe.configured, false);
     assert.equal(config.fallback.modelId, undefined);
-    assert.equal(config.codex.upstreamUrl, "https://api.openai.com/v1/responses");
+    assert.equal(config.codex.upstreamUrl, undefined, "upstream comes from detected user wiring");
   });
 
   it("never exposes secrets in the safe view or when serialized", () => {

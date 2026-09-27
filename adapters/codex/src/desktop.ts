@@ -69,6 +69,11 @@ export interface InjectResult {
   changedKeys: string[];
 }
 
+export interface ManagedAuth {
+  requiresOpenaiAuth?: boolean;
+  bearerToken?: string;
+}
+
 /**
  * Line-level edit of config.toml: only the two managed keys are touched, all
  * other bytes (including opencodex markers and user edits) stay untouched.
@@ -78,6 +83,7 @@ export async function injectDesktopConfig(options: {
   dataDirectory: string;
   port: number;
   catalogPath: string;
+  auth?: ManagedAuth;
   previousRecord?: DesktopIntegrationRecord;
 }): Promise<InjectResult> {
   const raw = await readFile(options.configPath, "utf8");
@@ -137,7 +143,7 @@ export async function injectDesktopConfig(options: {
     }
   }
 
-  const sectionLines = buildManagedSection(options.port);
+  const sectionLines = buildManagedSection(options.port, options.auth ?? {});
   const headerIndex = lines.findIndex((line) => line.trim() === PROVIDER_SECTION);
   let originalSection: string[] | null;
   if (headerIndex >= 0) {
@@ -273,16 +279,20 @@ function commentOfLine(line: string): string {
   return index >= 0 ? line.slice(index).trim() : "";
 }
 
-function buildManagedSection(port: number): string[] {
-  return [
+function buildManagedSection(port: number, auth: ManagedAuth): string[] {
+  const lines = [
     MANAGED_COMMENT,
     PROVIDER_SECTION,
     'name = "Jev Router"',
     "base_url = " + tomlString("http://127.0.0.1:" + port + "/v1"),
     'wire_api = "responses"',
-    "requires_openai_auth = true",
+    "requires_openai_auth = " + (auth.requiresOpenaiAuth === true ? "true" : "false"),
     "supports_websockets = false"
   ];
+  if (auth.bearerToken) {
+    lines.splice(lines.length - 1, 0, "experimental_bearer_token = " + tomlString(auth.bearerToken));
+  }
+  return lines;
 }
 
 function extractProviderSection(
@@ -387,30 +397,68 @@ export async function desktopAutostartExists(): Promise<boolean> {
  * Stops the listener on our fixed port, but only after confirming its command
  * line is our own "desktop run" service. Foreign processes are left alone.
  */
-export async function stopOwnService(port: number): Promise<{ stoppedPids: number[]; foreign: boolean }> {
-  const script = [
-    "$out = @()",
-    "$foreign = $false",
-    "$conns = Get-NetTCPConnection -LocalPort " + port + " -State Listen -ErrorAction SilentlyContinue",
-    "foreach ($c in $conns) {",
-    "  $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\" -ErrorAction SilentlyContinue",
-    "  if ($p -and $p.CommandLine -like '*jev-cli*desktop run*') {",
-    "    Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue",
-    "    $out += $c.OwningProcess",
-    "  } elseif ($p) { $foreign = $true }",
-    "}",
-    "Write-Output ('PIDS=' + ($out -join ','))",
-    "Write-Output ('FOREIGN=' + $foreign)"
-  ].join("\n");
-  try {
-    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", script]);
-    const pidLine = stdout.split(/\r?\n/).find((line) => line.startsWith("PIDS=")) ?? "PIDS=";
-    const foreignLine = stdout.split(/\r?\n/).find((line) => line.startsWith("FOREIGN=")) ?? "FOREIGN=False";
-    const pids = pidLine.slice(5).split(",").filter(Boolean).map(Number).filter(Number.isFinite);
-    return { stoppedPids: pids, foreign: foreignLine.endsWith("True") };
-  } catch {
-    return { stoppedPids: [], foreign: false };
+export async function stopOwnService(port: number): Promise<StopServiceResult> {
+  const before = await probeProxyHealth(port, 1_200);
+  if (!before.reachable) return { stoppedPids: [], foreign: false, stillRunning: false };
+  if (!before.ours) return { stoppedPids: [], foreign: true, stillRunning: true };
+
+  // Ownership is proven by /health (service === "jev-router"), so a plain
+  // taskkill on the listening PID is safe and works without WMI/NetTCP cmdlets.
+  const pid = (await pidViaCmdlet(port)) ?? (await pidViaNetstat(port));
+  const stoppedPids: number[] = [];
+  if (pid) {
+    try {
+      await execFileAsync("taskkill", ["/PID", String(pid), "/F"]);
+      stoppedPids.push(pid);
+    } catch {
+      // Fall through to the honest stillRunning check below.
+    }
   }
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const after = await probeProxyHealth(port, 1_200);
+  return { stoppedPids, foreign: false, stillRunning: after.reachable };
+}
+
+export interface StopServiceResult {
+  stoppedPids: number[];
+  foreign: boolean;
+  /** True when the port still answers after our kill attempts. */
+  stillRunning: boolean;
+}
+
+async function pidViaCmdlet(port: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-Command",
+      "(Get-NetTCPConnection -LocalPort " + port + " -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"
+    ]);
+    const pid = Number.parseInt(stdout.trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function pidViaNetstat(port: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync("netstat", ["-ano"]);
+    return parseNetstatPid(stdout, port);
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseNetstatPid(output: string, port: number): number | undefined {
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.includes("LISTENING")) continue;
+    const parts = line.trim().split(/\s+/);
+    const local = parts[1] ?? "";
+    if (!local.endsWith(":" + port)) continue;
+    const pid = Number.parseInt(parts[parts.length - 1] ?? "", 10);
+    if (Number.isFinite(pid) && pid > 0) return pid;
+  }
+  return undefined;
 }
 
 export function startServiceDetached(cliPath: string, nodePath: string): void {

@@ -55,7 +55,7 @@ export async function startCodexProxy(options: CodexProxyOptions): Promise<Codex
     new UpstreamExecutionProvider("openai", options.upstreamUrl, fetchImpl)
   ];
   const resolved: CodexProxyOptions = { ...options, executionProviders: providers };
-  const manualTurns = new Set<string>();
+  const manualTurns = new Map<string, number>();
 
   const server = createServer((request, response) => {
     void handleRequest(request, response, resolved, leases, manualTurns).catch((error) => {
@@ -104,7 +104,7 @@ async function handleRequest(
   response: ServerResponse,
   options: CodexProxyOptions,
   leases: ModelLeaseStore,
-  manualTurns: Set<string>
+  manualTurns: Map<string, number>
 ): Promise<void> {
   if (request.method === "GET" && request.url === "/health") {
     const cooling = (options.health?.snapshot() ?? [])
@@ -125,6 +125,7 @@ async function handleRequest(
 
   const parsed = JSON.parse((await readBody(request)).toString("utf8")) as CodexResponsesRequest;
   const summary = summarizeCodexRequest(parsed);
+  await options.health?.syncFromDisk();
   const turnId = createHash("sha256").update(summary.turnKey).digest("hex").slice(0, 16);
   const startedAt = performance.now();
   const sentinelSet = new Set(options.sentinelModels ?? ["jev-router"]);
@@ -132,8 +133,26 @@ async function handleRequest(
     typeof parsed.model === "string" && parsed.model.length > 0 ? parsed.model : undefined;
   const routed = requestedModel === undefined || sentinelSet.has(requestedModel);
   const manualModelId = routed ? undefined : requestedModel;
+  const nowMs = Date.now();
+  for (const [key, expiry] of manualTurns) {
+    if (expiry <= nowMs) manualTurns.delete(key);
+  }
   const manualFirst = manualModelId !== undefined && !manualTurns.has(turnId);
-  if (manualModelId !== undefined && manualFirst) manualTurns.add(turnId);
+  if (manualModelId !== undefined && manualFirst) {
+    manualTurns.set(turnId, nowMs + 30 * 60 * 1_000);
+  }
+
+  if (routed && options.routeEngineCandidates.length === 0) {
+    sendJson(response, 500, {
+      error: {
+        message: "Jev Router: no model profiles configured. Run: jev doctor",
+        type: "model_router_error",
+        param: null,
+        code: "no_model_profiles"
+      }
+    });
+    return;
+  }
 
   let decision: RouteDecision | undefined;
   let decisionLatencyMs = 0;
@@ -150,15 +169,16 @@ async function handleRequest(
       ? findCandidate(options.routeEngineCandidates, leaseModelId)
       : undefined;
     if (!primaryProfile) {
+      const previousModelId = leaseModelId ?? leases.lastUsed();
       decision = await options.routeEngine.route({
         request: summary.request,
         contextSummary: summary.contextSummary,
         candidates: options.routeEngineCandidates,
         preferences: {
-          ...(parsed.model !== "jev-router" && typeof parsed.model === "string"
-            ? { currentModelId: parsed.model }
-            : {}),
+          ...(previousModelId ? { currentModelId: previousModelId } : {}),
           estimatedInputTokens: summary.estimatedInputTokens,
+          conversationItems: summary.conversationItems,
+          toolCalls: summary.toolCalls,
           requiresTools: summary.hasTools,
           longTierEnabled: options.allowLongTier === true
         }
@@ -242,7 +262,7 @@ async function handleRequest(
       if (!upstream.ok) {
         const errorText = await upstream.text().catch(() => "");
         const failure = classifyHttpFailure(upstream.status, errorText);
-        options.health?.recordFailure(profile, failure);
+        if (failure.kind !== "request_invalid") options.health?.recordFailure(profile, failure);
         attemptChain.push({
           providerId: provider.providerId,
           modelId: profile.modelId,
@@ -405,6 +425,7 @@ async function logOutcome(args: LogOutcomeOptions): Promise<void> {
         probabilities: { [args.primaryProfile.modelId]: 1 },
         factors: { taskType: "continuation", complexity: 0, reasoningRequired: 0, toolComplexity: 0 },
         profileVersion: args.primaryProfile.profileVersion,
+        ...(args.manual ? { decisionSource: "manual" as const } : {}),
         turnId: args.turnId,
         switchReason
       };
@@ -492,7 +513,7 @@ function findCandidate(candidates: CapabilityProfile[], modelId: string): Capabi
 
 function adHocProfile(modelId: string): CapabilityProfile {
   return {
-    providerId: "openai",
+    providerId: "passthrough",
     modelId,
     profileVersion: "adhoc",
     updatedAt: new Date().toISOString(),
@@ -558,19 +579,23 @@ async function pipeUpstream(
 
 function forwardHeaders(headers: IncomingMessage["headers"]): Headers {
   const result = new Headers();
-  const allowed = [
-    "authorization",
-    "accept",
-    "content-type",
-    "openai-organization",
-    "openai-project",
-    "openai-beta",
-    "chatgpt-account-id",
-    "chatgpt-user-id"
-  ];
-  for (const name of allowed) {
-    const value = headers[name];
+  const skip = new Set([
+    "host",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection"
+  ]);
+  for (const [name, value] of Object.entries(headers)) {
+    if (skip.has(name.toLowerCase())) continue;
     if (typeof value === "string") result.set(name, value);
+    else if (Array.isArray(value)) for (const entry of value) result.append(name, entry);
   }
   return result;
 }

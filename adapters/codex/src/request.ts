@@ -17,6 +17,8 @@ export interface CodexRequestSummary {
   continuation: boolean;
   estimatedInputTokens: number;
   hasTools: boolean;
+  conversationItems: number;
+  toolCalls: number;
 }
 
 export function summarizeCodexRequest(body: CodexResponsesRequest): CodexRequestSummary {
@@ -48,7 +50,9 @@ export function summarizeCodexRequest(body: CodexResponsesRequest): CodexRequest
     turnKeys,
     continuation: Boolean(body.previous_response_id) || isToolOutput(items.at(-1)),
     estimatedInputTokens: Math.ceil(estimatedCharacters / 4),
-    hasTools: Array.isArray(body.tools) && body.tools.length > 0
+    hasTools: Array.isArray(body.tools) && body.tools.length > 0,
+    conversationItems: items.length,
+    toolCalls: functionCallCount
   };
 }
 

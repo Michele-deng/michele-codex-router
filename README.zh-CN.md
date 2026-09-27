@@ -34,19 +34,47 @@
   上下文摘要，绝不发送代码、工具输出、授权头或密钥；决策硬超时（默认
   800ms，中转慢建议 4000ms）超时立即 fail-open。
 
-## 你能得到什么（以及我们不吹的部分）
+## 你能得到什么 —— 说实话，取决于你的模型池
 
-- **决策层天生便宜。** Jev（TypeSafe System One 的 `jev-latest`）是
-  **分类模型**而不是文本生成器：读一段有界的任务摘要（≤8000 字符），
-  返回类型化的选择 + 置信度概率。没有生成 token、没有长输出——它拿的是
-  "分拣员"的工资，不是"写手"的工资，一次决策只是聊天轮次成本的零头。
-- **大多数回合本来就不该用最贵的模型。** 日常大头是解释、小修、文档、
-  常规改动：Jev Auto 把这些派给便宜快的模型，把前沿模型留给真正难的活；
-  低置信度的降档建议会被拒绝，不会把你的档位拉低。
-- **我们不编节省数字。** 真实节省取决于你的使用结构。每回合的模型/档位/
-  置信度/切换原因都记录在 `~/.jev-router/decisions.jsonl`
-  （`jev explain` 看最近一条），`evals/` 还有 30 任务基准集，
-  真实使用前后各跑一遍，成本与质量的对比你自己就能算出来。
+- **池子宽（3 档以上）：有省钱空间。** 日常大头是解释、小修、文档，
+  路由器把它们派给便宜快的模型，贵的留给真正需要的回合。
+- **池子窄（两档，如 flash/pro）：保质量，不是省钱。** 你本来就用便宜档，
+  没有钱可省；路由器的作用是难题自动升到强模型。这个场景我们**不承诺
+  省钱**，也不在文案里装作能省。
+- **决策本身花什么。** `auto` 策略下只有候选池出现 **3 种以上档位**才会
+  调用决策层；两档以内的池子由本地规则决定（零费用、零延迟、不碰第三方）。
+  调用 Jev（TypeSafe System One 的 `jev-latest`，**分类模型**、无生成
+  token）时，它收到的是有界摘要（任务 ≤8000 字符 + 上下文规模 ≤4000
+  字符），硬超时内返回（默认 800ms，超时回退规则）。
+- **不靠相信，靠测量。** 每回合的模型/档位/置信度/切换原因/`decisionSource`
+  （`rules` 或 `jev`）都记录在 `~/.jev-router/decisions.jsonl`，
+  `jev explain` 看最近一条，`evals/` 有 30 任务基准集做前后对比。
+
+## 为自己的供应商配置
+
+`jev doctor` 负责重活，模型变化后重新跑一次：
+
+```powershell
+node apps\jev-cli\dist\index.js doctor
+```
+
+它读取你 `config.toml` 里已有的接线（自定义 provider 块的
+`experimental_bearer_token`/`requires_openai_auth`，或根部
+`openai_base_url`），探测 `GET /models`，并为每个模型生成档案写到
+`~/.jev-router/profiles/`。探测失败且没有任何档案时，`desktop enable`
+会**拒绝安装**并列出缺什么——绝不"先接管再让你的用法全坏"。
+
+- 档位按模型名猜测（`pro/high/max`→high，`flash/mini/nano`→low，
+  其余 medium）；上下文优先取模型清单里的值，没有则保守 128k。档案标着
+  `auto-generated`，手动改 `~/.jev-router/profiles/<模型>.json` 校准。
+- 鉴权：注入的 `jev_router` provider 复制你上游的鉴权方式（bearer token /
+  `requires_openai_auth`），OpenAI 凭据不会被发往非 OpenAI 端点；没有
+  档案的模型原样直通你的上游。
+- 默认上游：跟随 config 已有接线；`JEV_CODEX_UPSTREAM_URL` 可覆盖；
+  `desktop enable` 只在 `.env` 该字段为空时自动填写。
+- 内容级错误（如上下文超限）会换候选重试但**不怪模型**——只有账号/渠道
+  拒答（`model_not_found`、不支持、额度）才计入冷却与三振停用。
+  `jev health-reset` 对运行中的服务立即生效。
 
 ## 环境要求
 
@@ -148,6 +176,7 @@ Codex 自己也会随时间改 `config.toml`（测试机上它自己加过一个
 | `DEEPSEEK_BASE_URL` / `_KEY` | 空 | 独立 DeepSeek 端点/Key |
 | `JEV_PROXY_PORT` | `10300` | 桌面固定代理端口 |
 | `JEV_UPSTREAM_TIMEOUT_MS` | `60000` | 上游头响应期限（小于 Codex 约 113 秒的耐心） |
+| `JEV_DECISION_POLICY` | `auto` | `auto`（≤2 档走规则、3 档调 Jev）/`always`/`rules` |
 | `JEV_ALLOW_LONG` | `0` | 允许 frontier 档参与 |
 
 ## 隐私与安全
@@ -178,7 +207,7 @@ Codex 自己也会随时间改 `config.toml`（测试机上它自己加过一个
 
 ## 测试与验证状态
 
-- `npm test`：**61 个单元/集成测试**（配置优先级、密钥脱敏、错误分类、
+- `npm test`：**76 个单元/集成测试**（配置优先级、密钥脱敏、错误分类、
   冷却/三振出局、决策超时、SSE 不缓冲、故障切换、租期粘性、手动旁路、
   回环端口、配置注入/还原往返）。
 - CI（GitHub Actions）：Node 20/24 矩阵 + 密钥/个人路径扫描。

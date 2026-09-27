@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import {
   appendFileSync,
+  readFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -9,7 +10,7 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,10 +25,13 @@ import {
   installDesktopAutostart,
   desktopPaths,
   desktopAutostartExists,
+  discoverProviderWiring,
+  fetchModelIds,
   injectDesktopConfig,
   isPortAccepting,
   launchCodex,
   mergeModelCatalog,
+  profilesFromModelIds,
   probeProxyHealth,
   readIntegrationRecord,
   readRootConfigLine,
@@ -40,7 +44,8 @@ import {
   stopOwnService,
   waitForProxyHealth,
   writeIntegrationRecord,
-  type CodexProxy
+  type CodexProxy,
+  type ProviderWiring
 } from "@jev-router/adapter-codex";
 import {
   collectSecretValues,
@@ -82,6 +87,7 @@ async function main(): Promise<number> {
     case "profiles": return runProfiles(config);
     case "health": return runHealth(config);
     case "health-reset": return runHealthReset(config, originalArgs);
+    case "doctor": return runDoctorCommand(config);
     case "explain": return runExplain(config);
     case "mcp": return runMcp(config);
     case "setup-key": case "setup": return runSetupKey(config);
@@ -97,15 +103,16 @@ async function main(): Promise<number> {
 async function runCodex(config: JevConfig, args: readonly string[]): Promise<number> {
   const health = new ModelHealthStore(config.dataDirectory);
   await health.load();
+  const { wiring, defaultUrl } = await resolveUpstream(config);
   return launchCodex({
     routeEngine: createRouteEngine(config),
     candidates: await loadProfiles(config),
     logger: createLogger(config),
     profilesDirectory: config.profilesDirectory,
     codexBin: resolveCodexBinary(config.codexBin),
-    upstreamUrl: config.codex.upstreamUrl,
+    upstreamUrl: defaultUrl,
     allowLongTier: config.allowLongTier,
-    executionProviders: buildExecutionProviders(config),
+    executionProviders: buildExecutionProviders(config, wiring, defaultUrl),
     health,
     sentinelModels: config.sentinelModels,
     adjustReasoning: config.adjustReasoning,
@@ -115,20 +122,49 @@ async function runCodex(config: JevConfig, args: readonly string[]): Promise<num
   }, args);
 }
 
-function buildExecutionProviders(config: JevConfig): ExecutionProvider[] {
+async function resolveUpstream(config: JevConfig): Promise<{ wiring: ProviderWiring; defaultUrl: string }> {
+  const deepseekKey = config.readSecret("deepseekApiKey");
+  const wiring = await discoverProviderWiring({
+    configPath: codexConfigPath(),
+    env: {
+      ...(config.deepseek.baseUrl ? { DEEPSEEK_BASE_URL: config.deepseek.baseUrl } : {}),
+      ...(deepseekKey ? { DEEPSEEK_API_KEY: deepseekKey } : {}),
+      ...(config.deepseek.wireApi ? { DEEPSEEK_WIRE_API: config.deepseek.wireApi } : {})
+    }
+  });
+  const defaultUrl = config.codex.upstreamUrl ??
+    (wiring.wireApi === "chat"
+      ? wiring.baseUrl + "/chat/completions"
+      : wiring.baseUrl + "/responses");
+  return { wiring, defaultUrl };
+}
+
+function buildExecutionProviders(
+  config: JevConfig,
+  wiring: ProviderWiring,
+  defaultUrl: string
+): ExecutionProvider[] {
+  const deepseekKey = config.readSecret("deepseekApiKey");
   const providers: ExecutionProvider[] = [
-    new UpstreamExecutionProvider("openai", config.codex.upstreamUrl)
+    new UpstreamExecutionProvider("openai", defaultUrl),
+    wiring.wireApi === "chat"
+      ? new DeepSeekExecutionProvider({
+          baseUrl: wiring.baseUrl,
+          ...(wiring.bearerToken ? { apiKey: wiring.bearerToken } : {}),
+          wireApi: "chat",
+          providerId: "passthrough"
+        })
+      : new UpstreamExecutionProvider("passthrough", wiring.baseUrl + "/responses")
   ];
-  if (config.deepseek.baseUrl) {
-    const apiKey = config.readSecret("deepseekApiKey");
-    providers.push(
-      new DeepSeekExecutionProvider({
-        baseUrl: config.deepseek.baseUrl,
-        ...(apiKey ? { apiKey } : {}),
-        wireApi: config.deepseek.wireApi
-      })
-    );
-  }
+  providers.push(
+    new DeepSeekExecutionProvider({
+      baseUrl: config.deepseek.baseUrl ?? wiring.baseUrl,
+      ...(deepseekKey ?? wiring.bearerToken
+        ? { apiKey: (deepseekKey ?? wiring.bearerToken) as string }
+        : {}),
+      wireApi: config.deepseek.wireApi
+    })
+  );
   return providers;
 }
 
@@ -152,7 +188,6 @@ async function runRoute(config: JevConfig, args: readonly string[]): Promise<num
     }
   };
   const decision = await engine.route(input);
-  await createLogger(config).append({ request, decision, latencyMs: Math.round(performance.now() - startedAt) });
   process.stdout.write(`${JSON.stringify(decision, null, 2)}\n`);
   return 0;
 }
@@ -173,8 +208,19 @@ async function runHealth(config: JevConfig): Promise<number> {
   } catch {
     codexVersion = "not found";
   }
+  const issues: Array<{ level: "error" | "warning"; message: string }> = [];
+  if (codexVersion === "not found") {
+    issues.push({ level: "error", message: "Codex CLI not found; set JEV_CODEX_BIN in .env" });
+  }
+  if (profiles.length === 0) {
+    issues.push({ level: "error", message: "no model profiles; run: node apps/jev-cli/dist/index.js doctor" });
+  }
+  if (!config.typesafe.configured) {
+    issues.push({ level: "warning", message: "TYPESAFE_API_KEY not set; decisions use local rules" });
+  }
   const report = {
-    ok: true,
+    ok: !issues.some((issue) => issue.level === "error"),
+    issues,
     node: process.version,
     codex: codexVersion,
     codexExecutable: codexBin,
@@ -197,9 +243,132 @@ async function runHealthReset(config: JevConfig, args: readonly string[]): Promi
   await store.load();
   const removed = store.reset(target);
   process.stdout.write(
-    JSON.stringify({ ok: true, target: target ?? "all", removed }, null, 2) + "\n"
+    JSON.stringify({
+      ok: true,
+      target: target ?? "all",
+      removed,
+      note: "applies to the running desktop service immediately (hot reload)"
+    }, null, 2) + "\n"
   );
   return 0;
+}
+
+interface DoctorOutcome {
+  ok: boolean;
+  issues: string[];
+  warnings: string[];
+  wiring: ProviderWiring;
+  defaultUrl: string;
+  report: Record<string, unknown>;
+  fetched: Awaited<ReturnType<typeof fetchModelIds>> | undefined;
+}
+
+/**
+ * Environment doctor: discover the user's upstream wiring, probe its model
+ * list, and report what is missing. Never prints secrets. Does not modify
+ * anything (enable commits generated profiles after preflight passes).
+ */
+async function runDoctor(config: JevConfig): Promise<DoctorOutcome> {
+  const { wiring, defaultUrl } = await resolveUpstream(config);
+  const issues: string[] = [];
+  const warnings: string[] = [];
+  const report: Record<string, unknown> = {
+    wiring: {
+      source: wiring.source,
+      kind: wiring.kind,
+      baseUrl: wiring.baseUrl,
+      wireApi: wiring.wireApi,
+      authConfigured: Boolean(wiring.bearerToken ?? wiring.requiresOpenaiAuth)
+    },
+    upstreamUrl: defaultUrl
+  };
+
+  let fetched: Awaited<ReturnType<typeof fetchModelIds>> | undefined;
+  try {
+    fetched = await fetchModelIds(wiring);
+  } catch (error) {
+    warnings.push(
+      "model list probe failed: " + (error instanceof Error ? error.message : String(error)) +
+        "; existing profiles will be used and must be verified manually"
+    );
+  }
+  if (fetched && fetched.ids.length === 0) {
+    issues.push(
+      "upstream model list is empty at " + wiring.modelsUrl +
+        "; point JEV_CODEX_UPSTREAM_URL/DEEPSEEK_BASE_URL at a working endpoint"
+    );
+  }
+  const existing = await loadProfiles(config);
+  if (existing.length === 0 && !(fetched && fetched.ids.length > 0)) {
+    issues.push(
+      "no model profiles in " + config.profilesDirectory +
+        "; run doctor after the upstream responds, or copy examples from profiles/examples and rename to your model ids"
+    );
+  }
+  report.models = { count: fetched?.ids.length ?? 0, sample: (fetched?.ids ?? []).slice(0, 5) };
+  report.profiles = { directory: config.profilesDirectory, existing: existing.length };
+  return { ok: issues.length === 0, issues, warnings, wiring, defaultUrl, report, fetched };
+}
+
+async function writeGeneratedProfiles(
+  config: JevConfig,
+  fetched: Awaited<ReturnType<typeof fetchModelIds>>
+): Promise<number> {
+  const profiles = profilesFromModelIds(fetched);
+  await mkdir(config.profilesDirectory, { recursive: true });
+  for (const profile of profiles) {
+    const fileName = profile.modelId.replace(/[\/\\]/g, "__") + ".json";
+    await writeFile(
+      path.join(config.profilesDirectory, fileName),
+      JSON.stringify(profile, null, 2) + "\n",
+      "utf8"
+    );
+  }
+  return profiles.length;
+}
+
+async function runDoctorCommand(config: JevConfig): Promise<number> {
+  const doctor = await runDoctor(config);
+  let generated = 0;
+  if (doctor.ok && doctor.fetched) {
+    generated = await writeGeneratedProfiles(config, doctor.fetched);
+  }
+  process.stdout.write(
+    JSON.stringify(
+      {
+        ok: doctor.ok,
+        issues: doctor.issues,
+        warnings: doctor.warnings,
+        profilesGenerated: generated,
+        ...doctor.report
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  return doctor.ok ? 0 : 1;
+}
+
+/** Adds a value to .env only when the key is absent or empty; never overwrites. */
+function ensureEnvValue(envFile: string, key: string, value: string): boolean {
+  try {
+    const current = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+    const eol = current.includes("\r\n") ? "\r\n" : "\n";
+    const lines = current.split(/\r?\n/);
+    const pattern = new RegExp("^" + key + "=");
+    const index = lines.findIndex((line) => pattern.test(line));
+    if (index >= 0) {
+      const existingValue = (lines[index] as string).slice(key.length + 1).trim();
+      if (existingValue) return false;
+      lines[index] = key + "=" + value + "   # auto-detected by jev doctor";
+    } else {
+      lines.push(key + "=" + value + "   # auto-detected by jev doctor");
+    }
+    writeFileSync(envFile, lines.join(eol), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function runExplain(config: JevConfig): Promise<number> {
@@ -336,7 +505,8 @@ function createRouteEngine(config: JevConfig): RouteEngine {
     createDecisionProvider(config),
     config.fallback.modelId,
     0.55,
-    config.routeTimeoutMs
+    config.routeTimeoutMs,
+    config.decisionPolicy
   );
 }
 
@@ -469,14 +639,15 @@ async function runDesktopService(config: JevConfig): Promise<number> {
   const healthStore = new ModelHealthStore(config.dataDirectory);
   await healthStore.load();
   let proxy: CodexProxy;
+  const { wiring, defaultUrl } = await resolveUpstream(config);
   try {
     proxy = await startCodexProxy({
       routeEngine: createRouteEngine(config),
       routeEngineCandidates: await loadProfiles(config),
       logger: createLogger(config),
-      upstreamUrl: config.codex.upstreamUrl,
+      upstreamUrl: defaultUrl,
       allowLongTier: config.allowLongTier,
-      executionProviders: buildExecutionProviders(config),
+      executionProviders: buildExecutionProviders(config, wiring, defaultUrl),
       health: healthStore,
       port: config.proxyPort,
     sentinelModels: config.sentinelModels,
@@ -523,6 +694,40 @@ async function runDesktopEnable(config: JevConfig): Promise<number> {
     return 1;
   }
 
+  const doctor = await runDoctor(config);
+  for (const warning of doctor.warnings) steps.push("warning: " + warning);
+  if (!doctor.ok) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ok: false,
+          refused: true,
+          reason: "preflight failed; nothing was modified",
+          issues: doctor.issues,
+          warnings: doctor.warnings,
+          ...doctor.report
+        },
+        null,
+        2
+      ) + "\n"
+    );
+    return 1;
+  }
+  if (doctor.fetched) {
+    const generated = await writeGeneratedProfiles(config, doctor.fetched);
+    steps.push("profiles generated: " + generated + " in " + config.profilesDirectory);
+  }
+  if (
+    !config.codex.upstreamUrl &&
+    ensureEnvValue(config.envFile, "JEV_CODEX_UPSTREAM_URL", doctor.defaultUrl)
+  ) {
+    steps.push(".env JEV_CODEX_UPSTREAM_URL auto-filled from your wiring");
+  }
+  steps.push(
+    "doctor: upstream " + doctor.wiring.baseUrl + " (" + doctor.wiring.source + "), models=" +
+      String((doctor.report.models as { count?: number } | undefined)?.count ?? 0)
+  );
+
   const backup = await backupConfig(configPath, config.dataDirectory);
   steps.push("config backed up: " + backup);
 
@@ -543,6 +748,10 @@ async function runDesktopEnable(config: JevConfig): Promise<number> {
     dataDirectory: config.dataDirectory,
     port: config.proxyPort,
     catalogPath: paths.catalogPath,
+    auth: {
+      requiresOpenaiAuth: doctor.wiring.requiresOpenaiAuth === true,
+      ...(doctor.wiring.bearerToken ? { bearerToken: doctor.wiring.bearerToken } : {})
+    },
     ...(previousRecord ? { previousRecord } : {})
   });
   await writeIntegrationRecord(config.dataDirectory, injected.record);
@@ -599,7 +808,8 @@ async function collectDesktopStatus(config: JevConfig): Promise<DesktopStatus> {
   const autostartInstalled = await desktopAutostartExists();
   const record = await readIntegrationRecord(config.dataDirectory);
   const proxy = await probeProxyHealth(config.proxyPort);
-  const upstream = await upstreamReachable(config.codex.upstreamUrl);
+  const { defaultUrl: effectiveUpstreamUrl } = await resolveUpstream(config);
+  const upstream = await upstreamReachable(effectiveUpstreamUrl);
   const healthStore = new ModelHealthStore(config.dataDirectory);
   await healthStore.load();
   const disabledModels = healthStore.snapshot()
@@ -646,7 +856,7 @@ async function collectDesktopStatus(config: JevConfig): Promise<DesktopStatus> {
     catalog: { path: paths.catalogPath, sentinelPresent },
     autostart: { file: DESKTOP_AUTOSTART_FILE, exists: autostartInstalled },
     integrationRecord: { exists: Boolean(record) },
-    upstream: { url: config.codex.upstreamUrl, reachable: upstream.reachable },
+    upstream: { url: effectiveUpstreamUrl, reachable: upstream.reachable },
     disabledModels,
     issues
   };
@@ -680,11 +890,17 @@ async function runDesktopDisable(config: JevConfig): Promise<number> {
   const stopped = await stopOwnService(config.proxyPort);
   if (stopped.stoppedPids.length > 0) {
     steps.push("proxy stopped (pid " + stopped.stoppedPids.join(", ") + ")");
-  } else {
+  } else if (!stopped.stillRunning) {
     steps.push("proxy was not running");
   }
   if (stopped.foreign) {
     issues.push("port " + config.proxyPort + " is still held by a non-Jev process; left untouched");
+  }
+  if (stopped.stillRunning) {
+    issues.push(
+      "proxy still answers on port " + config.proxyPort +
+        " after stop attempts; kill it manually with taskkill /PID <pid> /F"
+    );
   }
 
   const record = await readIntegrationRecord(config.dataDirectory);
@@ -725,6 +941,7 @@ function printHelp(): void {
       "  jev profiles                    List configured model profiles",
       "  jev health                      Report configuration status without secrets",
       "  jev health-reset [modelId]      Clear auto-disabled model health records",
+      "  jev doctor                      Detect your upstream and generate model profiles",
       "  jev explain                     Show the most recent routing decision",
       "  jev mcp                         Run the MCP stdio server",
       "  jev setup-key                   Create or locate the .env file",

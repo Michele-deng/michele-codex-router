@@ -1,4 +1,5 @@
 import { RouteError } from "./errors.js";
+import { decideWithRules, distinctTierCount, heuristicTaskType, type DecisionPolicy } from "./rule-decide.js";
 import type {
   CapabilityProfile,
   ModelTier,
@@ -15,7 +16,8 @@ export class RouteEngine {
     private readonly decisionProvider: TypedDecisionProvider,
     private readonly fallbackModelId?: string,
     private readonly lowConfidenceThreshold = 0.55,
-    private readonly decisionTimeoutMs?: number
+    private readonly decisionTimeoutMs?: number,
+    private readonly decisionPolicy: DecisionPolicy = "auto"
   ) {}
 
   async route(input: RouteInput): Promise<RouteDecision> {
@@ -25,7 +27,7 @@ export class RouteEngine {
       if (!explicit) {
         throw new RouteError(`Explicit model is not available: ${explicitModelId}`, "MODEL_UNAVAILABLE");
       }
-      return this.staticDecision(explicit, input, 1);
+      return this.staticDecision(explicit, input, 1, "manual");
     }
 
     const eligible = this.eligibleCandidates(input);
@@ -37,30 +39,54 @@ export class RouteEngine {
       };
     }
 
+    // Small pools (at most 2 distinct tiers) are a binary choice: local rules
+    // decide without paying for or waiting on the decision provider.
+    if (
+      eligible.length > 0 &&
+      (this.decisionPolicy === "rules" ||
+        (this.decisionPolicy === "auto" && distinctTierCount(eligible) <= 2))
+    ) {
+      return decideWithRules(input, eligible, input.preferences?.currentModelId);
+    }
+
     let judgment: RawRoutingJudgment;
     try {
       judgment = await this.decideWithinBudget(input, eligible);
     } catch (error) {
+      const reason = error instanceof RouteError && error.code === "DECISION_TIMEOUT"
+        ? "Decision timed out after " + this.decisionTimeoutMs + "ms"
+        : error instanceof Error ? error.message : "Decision provider failed";
+      if (eligible.length > 0) {
+        return {
+          ...decideWithRules(input, eligible, input.preferences?.currentModelId),
+          fallback: { reason }
+        };
+      }
       const fallback = this.resolveFallback(input, eligible);
       return {
-        ...this.staticDecision(fallback, input, 0),
-        fallback: {
-          reason: error instanceof RouteError && error.code === "DECISION_TIMEOUT"
-            ? "Decision timed out after " + this.decisionTimeoutMs + "ms"
-            : error instanceof Error ? error.message : "Decision provider failed"
-        }
+        ...this.staticDecision(fallback, input, 0, "rules"),
+        fallback: { reason }
       };
     }
 
     const selected = eligible.find((candidate) => candidate.modelId === judgment.selectedModelId);
     if (!selected) {
+      const reason = "Jev selected a model that is no longer eligible";
+      if (eligible.length > 0) {
+        return {
+          ...decideWithRules(input, eligible, input.preferences?.currentModelId),
+          factors: judgment.factors,
+          probabilities: judgment.probabilities,
+          fallback: { reason, originalModelId: judgment.selectedModelId }
+        };
+      }
       const fallback = this.resolveFallback(input, eligible);
       return {
-        ...this.staticDecision(fallback, input, judgment.confidence),
+        ...this.staticDecision(fallback, input, judgment.confidence, "rules"),
         factors: judgment.factors,
         probabilities: judgment.probabilities,
         fallback: {
-          reason: "Jev selected a model that is no longer eligible",
+          reason,
           originalModelId: judgment.selectedModelId
         }
       };
@@ -176,6 +202,7 @@ export class RouteEngine {
       probabilities: judgment.probabilities,
       factors: judgment.factors,
       profileVersion: final.profileVersion,
+      decisionSource: "jev",
       ...(fallback ? { fallback } : {})
     };
   }
@@ -201,7 +228,8 @@ export class RouteEngine {
   private staticDecision(
     profile: CapabilityProfile,
     input: RouteInput,
-    confidence: number
+    confidence: number,
+    source: "rules" | "manual" = "rules"
   ): RouteDecision {
     return {
       providerId: profile.providerId ?? "openai",
@@ -215,17 +243,8 @@ export class RouteEngine {
         reasoningRequired: profile.static.tier === "low" ? 0.2 : 0.8,
         toolComplexity: profile.static.supportsTools ? 0.5 : 0
       },
-      profileVersion: profile.profileVersion
+      profileVersion: profile.profileVersion,
+      decisionSource: source
     };
   }
-}
-
-function heuristicTaskType(request: string): string {
-  const normalized = request.toLowerCase();
-  if (/\b(test|spec|coverage)\b/.test(normalized)) return "test";
-  if (/\b(debug|fix|bug|error|fail)\b/.test(normalized)) return "debug";
-  if (/\b(refactor|rename|cleanup)\b/.test(normalized)) return "refactor";
-  if (/\b(architecture|design|plan)\b/.test(normalized)) return "architecture";
-  if (/\b(implement|add|create|edit)\b/.test(normalized)) return "code_edit";
-  return "chat";
 }

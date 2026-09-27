@@ -70,7 +70,13 @@ function validateRuntime(runtime: RuntimeCapability): RuntimeCapability {
 }
 
 export async function loadProfileDirectory(directory: string): Promise<CapabilityProfile[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map((entry) => entry.name)

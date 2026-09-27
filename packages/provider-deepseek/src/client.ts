@@ -14,6 +14,7 @@ export interface DeepSeekExecutionOptions {
   baseUrl: string;
   apiKey?: string;
   wireApi?: DeepSeekWireApi;
+  providerId?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -28,11 +29,12 @@ export interface ExecuteOptions {
  * here so a DeepSeek request cannot be misrouted to OpenAI.
  */
 export class DeepSeekExecutionProvider {
-  readonly providerId = "deepseek";
+  readonly providerId: string;
   readonly endpoints: ReturnType<typeof resolveDeepSeekEndpoints>;
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly options: DeepSeekExecutionOptions) {
+    this.providerId = options.providerId ?? "deepseek";
     this.endpoints = resolveDeepSeekEndpoints(options.baseUrl, options.wireApi);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
