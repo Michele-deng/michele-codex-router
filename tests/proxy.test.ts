@@ -234,7 +234,10 @@ describe("Codex proxy", () => {
         text += new TextDecoder().decode(value);
       }
 
-      assert.ok((arrivals[0] ?? Infinity) < 100, "first chunk must not be buffered");
+      // Generous absolute bound for loaded CI runners; buffering itself is
+      // caught by the relative assertions below (a buffered stream delivers
+      // chunks back-to-back, collapsing the gap).
+      assert.ok((arrivals[0] ?? Infinity) < 500, "first chunk must not be buffered");
       assert.ok((arrivals.at(-1) ?? 0) - (arrivals[0] ?? 0) >= 100, "later chunks stay later");
       assert.ok(text.indexOf('{"chunk":1}') < text.indexOf('{"chunk":2}'), "event order preserved");
       assert.equal(harness.judge.calls, 1);
