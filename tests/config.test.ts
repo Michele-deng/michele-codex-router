@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -12,6 +12,7 @@ import {
   redactDeep,
   redactText
 } from "@jev-router/config";
+import { DecisionLogger } from "@jev-router/core";
 
 const missingEnvFile = (): string => path.join(os.tmpdir(), "jev-router-no-such-file", ".env");
 
@@ -126,5 +127,54 @@ describe("parsing", () => {
     assert.equal(parseInteger("5", 800, { min: 50 }), 800);
     assert.equal(parseInteger("90000", 800, { max: 60_000 }), 800);
     assert.equal(parseInteger(undefined, 800), 800);
+  });
+});
+
+describe("corrupted and bounded outputs", () => {
+  it("survives a corrupted .env without touching the file (CFG-003)", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "jev-broken-env-"));
+    try {
+      const envFile = path.join(directory, ".env");
+      const garbage = Buffer.from([0x00, 0xff, 0x4b, 0x45, 0x59, 0x3d, 0x00, 0x41]);
+      writeFileSync(envFile, garbage);
+
+      const config = loadJevConfig({ projectRoot: directory, envFile });
+      assert.equal(config.envFileFound, true);
+      assert.deepEqual(readFileSync(envFile), garbage, "the file must not be rewritten");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds and redacts excerpts when enabled (SEC-009)", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "jev-excerpt-"));
+    try {
+      const decision = {
+        providerId: "deepseek",
+        modelId: "m",
+        tier: "low" as const,
+        confidence: 1,
+        probabilities: { m: 1 },
+        factors: { taskType: "chat", complexity: 0, reasoningRequired: 0, toolComplexity: 0 },
+        profileVersion: "t"
+      };
+      const canary = "JEV-CANARY-20260928-LOCAL-ONLY";
+      const logger = new DecisionLogger(directory, true, (text) => text.split(canary).join("***"));
+      await logger.append({ request: canary + " " + "x".repeat(500), decision, latencyMs: 1 });
+      const record = await logger.latest();
+      assert.ok((record?.excerpt?.length ?? 0) <= 120, "excerpt is bounded");
+      assert.equal(record?.excerpt?.includes(canary), false, "redactor strips the canary");
+
+      const plain = new DecisionLogger(directory, true);
+      await plain.append({ request: "leak sk-abcdefghijklmnop123456 tail", decision, latencyMs: 1 });
+      const second = await plain.latest();
+      assert.equal(
+        second?.excerpt?.includes("sk-abcdefghijklmnop123456"),
+        false,
+        "built-in pattern redaction"
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -316,15 +316,20 @@ async function writeGeneratedProfiles(
 ): Promise<number> {
   const profiles = profilesFromModelIds(fetched);
   await mkdir(config.profilesDirectory, { recursive: true });
+  let written = 0;
   for (const profile of profiles) {
     const fileName = profile.modelId.replace(/[\/\\]/g, "__") + ".json";
+    // Never overwrite: an existing file may carry manual tier/context
+    // calibration (test plan PROF-005). Delete the file to regenerate it.
+    if (existsSync(path.join(config.profilesDirectory, fileName))) continue;
     await writeFile(
       path.join(config.profilesDirectory, fileName),
       JSON.stringify(profile, null, 2) + "\n",
       "utf8"
     );
+    written += 1;
   }
-  return profiles.length;
+  return written;
 }
 
 async function runDoctorCommand(config: JevConfig): Promise<number> {
@@ -437,7 +442,11 @@ async function loadProfiles(config: JevConfig): Promise<CapabilityProfile[]> {
 }
 
 function createLogger(config: JevConfig): DecisionLogger {
-  return new DecisionLogger(config.dataDirectory, config.logExcerpt);
+  return new DecisionLogger(
+    config.dataDirectory,
+    config.logExcerpt,
+    (text) => redactText(text, collectSecretValues())
+  );
 }
 
 const CODEX_BINARY_CANDIDATES = process.platform === "win32"

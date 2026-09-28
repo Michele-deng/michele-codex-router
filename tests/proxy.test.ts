@@ -8,9 +8,13 @@ import {
   classifyHttpFailure,
   ModelHealthStore,
   RouteEngine,
-  type CapabilityProfile
+  type CapabilityProfile,
+  type RouteInput,
+  type TypedDecisionProvider
 } from "@jev-router/core";
 import {
+  ModelLeaseStore,
+  UpstreamExecutionProvider,
   startCodexProxy,
   type CodexProxy,
   type CodexResponsesRequest,
@@ -79,7 +83,7 @@ async function createHarness(args: {
   judgeTierScore?: number;
   headerTimeoutMs?: number;
   decisionPolicy?: "auto" | "always" | "rules";
-  judgeProvider?: ScriptedJudge;
+  judgeProvider?: TypedDecisionProvider & { calls: number };
 }): Promise<Harness> {
   const directory = mkdtempSync(path.join(os.tmpdir(), "jev-proxy-"));
   const judge = args.judgeProvider ?? new StubDecisionProvider(
@@ -795,6 +799,262 @@ describe("Codex proxy", () => {
       );
       const log = await harness.waitForLog(1);
       assert.equal(log[0]?.attemptChain[0].failureKind, "request_invalid");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("expires leases after their TTL (TURN-006)", async () => {
+    const leases = new ModelLeaseStore(40);
+    leases.set("turn", "model-a");
+    assert.equal(leases.get("turn"), "model-a");
+    assert.equal(leases.lastUsed(), "model-a");
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    assert.equal(leases.get("turn"), undefined, "expired lease forces a fresh decision");
+  });
+
+  it("keeps concurrent sessions on their own models (TURN-009)", async () => {
+    class ContentJudge {
+      calls = 0;
+      async decide(input: RouteInput): Promise<ReturnType<typeof judgment>> {
+        this.calls += 1;
+        return judgment(input.request.includes("one") ? "model-one" : "model-two");
+      }
+    }
+    const openai = new ScriptedProvider("openai", [
+      () => sseResponse([{ text: "data: a\n\n" }]),
+      () => sseResponse([{ text: "data: b\n\n" }])
+    ]);
+    const judge = new ContentJudge();
+    const harness = await createHarness({
+      candidates: [
+        profile("model-one", "low", { providerId: "openai" }),
+        profile("model-two", "high", { providerId: "openai" })
+      ],
+      providers: [openai],
+      judgeProvider: judge
+    });
+
+    try {
+      const [first, second] = await Promise.all([
+        post(harness.proxy, {
+          model: "jev-router",
+          stream: true,
+          prompt_cache_key: "session-one",
+          input: [{ role: "user", content: "task session one" }]
+        }),
+        post(harness.proxy, {
+          model: "jev-router",
+          stream: true,
+          prompt_cache_key: "session-two",
+          input: [{ role: "user", content: "task session two" }]
+        })
+      ]);
+      await first.text();
+      await second.text();
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
+      assert.equal(judge.calls, 2, "one decision per session");
+      for (const call of openai.calls) {
+        const input = JSON.stringify(call.request.input);
+        const expected = input.includes("session one") ? "model-one" : "model-two";
+        assert.equal(call.request.model, expected, "sessions must not share leases");
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("stops immediately when the client disconnects before headers (STREAM-004)", async () => {
+    const openai = new ScriptedProvider("openai", [
+      { delayMs: 5_000, response: sseResponse([{ text: "data: never\n\n" }]) }
+    ]);
+    const deepseek = new ScriptedProvider("deepseek", []);
+    const harness = await createHarness({
+      candidates: [
+        profile("gpt-high", "high", { providerId: "openai" }),
+        profile("deepseek/deepseek-flash", "medium", { providerId: "deepseek" })
+      ],
+      providers: [openai, deepseek],
+      judgeModelId: "gpt-high"
+    });
+
+    try {
+      const controller = new AbortController();
+      const pending = fetch("http://127.0.0.1:" + harness.proxy.port + "/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "jev-router",
+          stream: true,
+          input: [{ role: "user", content: "slow upstream" }]
+        }),
+        signal: controller.signal
+      }).catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      controller.abort();
+      await pending;
+
+      const log = await harness.waitForLog(1);
+      assert.match(log[0]?.failureReason ?? "", /client disconnected/);
+      assert.equal(openai.calls.length, 1, "in-flight attempt is aborted");
+      assert.equal(deepseek.calls.length, 0, "no switching for a dead client");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("records a mid-stream upstream break (STREAM-005)", async () => {
+    const broken = new ScriptedProvider("openai", [
+      () => {
+        let pulls = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              // First pull delivers a chunk to the client; the next one breaks.
+              pulls += 1;
+              if (pulls === 1) {
+                controller.enqueue(new TextEncoder().encode("data: first\n\n"));
+                return;
+              }
+              throw new Error("upstream exploded mid-stream");
+            }
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      }
+    ]);
+    const harness = await createHarness({
+      candidates: [profile("gpt-high", "high", { providerId: "openai" })],
+      providers: [broken],
+      judgeModelId: "gpt-high"
+    });
+
+    try {
+      const response = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        input: [{ role: "user", content: "break it" }]
+      });
+      const reader = response.body?.getReader();
+      let received = "";
+      try {
+        while (reader) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          received += new TextDecoder().decode(value);
+        }
+      } catch {
+        // The client observes the broken stream; the log must capture it.
+      }
+      assert.match(received, /first/);
+      const log = await harness.waitForLog(1);
+      assert.match(log[0]?.failureReason ?? "", /stream interrupted/);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("finishes cleanly on an empty upstream body (STREAM-007)", async () => {
+    const empty = new ScriptedProvider("openai", [new Response(null, { status: 200 })]);
+    const harness = await createHarness({
+      candidates: [profile("gpt-high", "high", { providerId: "openai" })],
+      providers: [empty],
+      judgeModelId: "gpt-high"
+    });
+
+    try {
+      const response = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        input: [{ role: "user", content: "empty" }]
+      });
+      assert.equal(response.status, 200);
+      assert.equal(await response.text(), "");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("returns 404 for unknown paths without touching providers (STREAM-008)", async () => {
+    const openai = new ScriptedProvider("openai", []);
+    const harness = await createHarness({
+      candidates: [profile("gpt-high", "high", { providerId: "openai" })],
+      providers: [openai],
+      judgeModelId: "gpt-high"
+    });
+
+    try {
+      const response = await fetch("http://127.0.0.1:" + harness.proxy.port + "/other", {
+        method: "POST",
+        body: "{}"
+      });
+      assert.equal(response.status, 404);
+      assert.equal(openai.calls.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("skips a missing execution provider and continues (PROV-007)", async () => {
+    const deepseek = new ScriptedProvider("deepseek", [
+      () => sseResponse([{ text: "data: ok\n\n" }])
+    ]);
+    const harness = await createHarness({
+      candidates: [
+        profile("ghost-model", "high", { providerId: "ghost" }),
+        profile("deepseek/deepseek-flash", "medium", { providerId: "deepseek" })
+      ],
+      providers: [deepseek],
+      judgeModelId: "ghost-model"
+    });
+
+    try {
+      const response = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        input: [{ role: "user", content: "hi" }]
+      });
+      assert.equal(response.status, 200);
+      const log = await harness.waitForLog(1);
+      assert.equal(log[0]?.attemptChain[0].failureKind, "config");
+      assert.equal(log[0]?.attemptChain[1].ok, true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("never follows upstream redirects (PROV-008)", async () => {
+    let seen: RequestInit | undefined;
+    const fake = (async (_url: unknown, init: RequestInit) => {
+      seen = init;
+      return new Response(null, { status: 301, headers: { location: "http://elsewhere/" } });
+    }) as typeof fetch;
+    const provider = new UpstreamExecutionProvider("openai", "http://upstream/v1/responses", fake);
+    const response = await provider.execute({ model: "m" }, { headers: new Headers() });
+    assert.equal(response.status, 301);
+    assert.equal(seen?.redirect, "manual");
+  });
+
+  it("answers a routing request with no profiles using a clear diagnostic", async () => {
+    const openai = new ScriptedProvider("openai", []);
+    const harness = await createHarness({
+      candidates: [],
+      providers: [openai],
+      judgeModelId: "missing"
+    });
+
+    try {
+      const response = await post(harness.proxy, {
+        model: "jev-router",
+        stream: true,
+        input: [{ role: "user", content: "hi" }]
+      });
+      assert.ok(response.status >= 400);
+      const body = await response.json() as { error?: { code?: string; message?: string } };
+      assert.equal(body.error?.code, "no_model_profiles");
+      assert.match(body.error?.message ?? "", /jev doctor/);
+      assert.equal(openai.calls.length, 0);
     } finally {
       await harness.close();
     }

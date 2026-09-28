@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -180,6 +180,34 @@ describe("ModelHealthStore", () => {
       await service.syncFromDisk();
       assert.equal(service.isPermanentlyDisabled(model), false, "reset applies to the running service");
       assert.equal(service.isCoolingDown(model), false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a cooled model to the pool after the cooldown expires (FAIL-015)", () => {
+    const store = new ModelHealthStore();
+    const model = profile("retry-model", "medium");
+    store.recordFailure(model, classifyHttpFailure(429), 1_000);
+    assert.equal(store.isCoolingDown(model, 1_001), true);
+    assert.equal(
+      store.isCoolingDown(model, 1_000 + 30_001),
+      false,
+      "base cooldown expires without a restart"
+    );
+    assert.equal(store.isPermanentlyDisabled(model), false);
+  });
+
+  it("re-initializes when model-health.json is corrupted (REC-001)", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "jev-health-corrupt-"));
+    try {
+      writeFileSync(path.join(directory, "model-health.json"), "{ not json", "utf8");
+      const store = new ModelHealthStore(directory);
+      await store.load();
+      assert.equal(store.snapshot().length, 0, "corrupt state starts fresh");
+      const model = profile("after-corruption", "medium");
+      store.recordFailure(model, classifyHttpFailure(429), 1_000);
+      assert.equal(store.isCoolingDown(model, 1_001), true, "tracking still works");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

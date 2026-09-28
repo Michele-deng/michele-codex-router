@@ -32,7 +32,8 @@ export interface AttemptRecord {
 export class DecisionLogger {
   constructor(
     private readonly directory: string,
-    private readonly includeExcerpt = process.env.JEV_LOG_EXCERPT === "1"
+    private readonly includeExcerpt = process.env.JEV_LOG_EXCERPT === "1",
+    private readonly redact?: (text: string) => string
   ) {}
 
   async append(record: Omit<DecisionRecord, "decisionId" | "timestamp" | "taskHash" | "excerpt"> & {
@@ -48,7 +49,7 @@ export class DecisionLogger {
         .slice(0, 20),
       timestamp: now.toISOString(),
       taskHash,
-      ...(this.includeExcerpt ? { excerpt: record.request.slice(0, 120).replace(/\s+/g, " ") } : {}),
+      ...(this.includeExcerpt ? { excerpt: this.safeExcerpt(record.request) } : {}),
       decision: record.decision,
       latencyMs: record.latencyMs,
       ...(record.turnId !== undefined ? { turnId: record.turnId } : {}),
@@ -63,6 +64,15 @@ export class DecisionLogger {
     await appendFile(this.logPath, `${JSON.stringify(clean)}\n`, { encoding: "utf8", mode: 0o600 });
     await this.writeLatest(clean);
     return clean;
+  }
+
+  private safeExcerpt(request: string): string {
+    const bounded = request.slice(0, 120).replace(/\s+/g, " ");
+    const patternRedacted = bounded.replace(
+      /\b(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,})/g,
+      "***"
+    );
+    return this.redact ? this.redact(patternRedacted) : patternRedacted;
   }
 
   async latest(): Promise<DecisionRecord | undefined> {

@@ -198,4 +198,100 @@ describe("RouteEngine", () => {
     assert.equal(decision.modelId, "expensive");
     assert.match(decision.fallback?.reason ?? "", /down/);
   });
+
+  it("keeps a hot-cache current model from being downgraded (ROUTE-009)", async () => {
+    const provider = new StubDecisionProvider(judgment("low-model", 0.9));
+    const engine = new RouteEngine(provider, undefined, 0.55, undefined, "always");
+    const low = profile("low-model", "low");
+    const high = profile("high-model", "high", { runtime: { available: true, cacheState: "hot" } });
+
+    const decision = await engine.route({
+      request: "x",
+      candidates: [low, high],
+      preferences: { currentModelId: "high-model" }
+    });
+    assert.equal(decision.modelId, "high-model");
+    assert.match(decision.fallback?.reason ?? "", /hot-cache|reprocessing/);
+  });
+
+  it("filters candidates over maxCost (ROUTE-015)", async () => {
+    const provider = new StubDecisionProvider(judgment("pricey", 0.9));
+    const engine = new RouteEngine(provider, undefined, 0.55, undefined, "always");
+    const cheap = profile("cheap", "low");
+    cheap.static.inputPrice = 1;
+    const pricey = profile("pricey", "high");
+    pricey.static.inputPrice = 10;
+
+    const decision = await engine.route({
+      request: "x",
+      candidates: [cheap, pricey],
+      preferences: { maxCost: 5 }
+    });
+    assert.equal(decision.modelId, "cheap");
+  });
+
+  it("filters candidates whose runtime context cannot fit (ROUTE-013b)", async () => {
+    const provider = new StubDecisionProvider(judgment("slow-model", 0.9));
+    const engine = new RouteEngine(provider, undefined, 0.55, undefined, "always");
+    const slow = profile("slow-model", "medium", {
+      runtime: { available: true, contextRemaining: 100 }
+    });
+    const roomy = profile("roomy-model", "medium");
+
+    const decision = await engine.route({
+      request: "x",
+      candidates: [slow, roomy],
+      preferences: { estimatedInputTokens: 500 }
+    });
+    assert.equal(decision.modelId, "roomy-model");
+  });
+
+  it("hard-filters models without tool support when tools are required (ROUTE-012)", async () => {
+    const provider = new StubDecisionProvider(judgment("no-tool-model", 0.9));
+    const engine = new RouteEngine(provider, undefined, 0.55, undefined, "always");
+    const noTool = profile("no-tool-model", "low");
+    noTool.static.supportsTools = false;
+    const toolModel = profile("tool-model", "low");
+
+    const decision = await engine.route({
+      request: "run the test suite",
+      candidates: [noTool, toolModel],
+      preferences: { requiresTools: true }
+    });
+    assert.equal(decision.modelId, "tool-model");
+  });
+
+  it("falls back to the highest tier when every candidate is filtered out (ROUTE-010)", async () => {
+    const provider = new StubDecisionProvider(judgment("low-model", 0.9));
+    const engine = new RouteEngine(provider, undefined, 0.55, undefined, "always");
+    const low = profile("low-model", "low", { runtime: { available: false } });
+    const high = profile("high-model", "high", { runtime: { available: false } });
+
+    const decision = await engine.route({ request: "x", candidates: [low, high] });
+    assert.equal(decision.modelId, "high-model");
+    assert.match(decision.fallback?.reason ?? "", /No eligible candidates/);
+  });
+
+  it("honours explicit rules and always policies (ROUTE-005)", async () => {
+    const wide = [
+      profile("low-model", "low"),
+      profile("mid-model", "medium"),
+      profile("high-model", "high")
+    ];
+    const rulesProvider = new StubDecisionProvider(judgment("high-model"));
+    const rulesEngine = new RouteEngine(rulesProvider, undefined, 0.55, undefined, "rules");
+    const ruled = await rulesEngine.route({ request: "hi", candidates: wide });
+    assert.equal(ruled.decisionSource, "rules");
+    assert.equal(rulesProvider.calls, 0);
+
+    const alwaysProvider = new StubDecisionProvider(judgment("dear", 0.9));
+    const alwaysEngine = new RouteEngine(alwaysProvider, undefined, 0.55, undefined, "always");
+    const asked = await alwaysEngine.route({
+      request: "hi",
+      candidates: [profile("cheap", "low"), profile("dear", "high")]
+    });
+    assert.equal(alwaysProvider.calls, 1);
+    assert.equal(asked.decisionSource, "jev");
+    assert.equal(asked.modelId, "dear");
+  });
 });

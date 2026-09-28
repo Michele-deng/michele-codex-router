@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import {
   DESKTOP_MANAGED_MARKER,
@@ -14,6 +16,30 @@ import {
   restoreDesktopConfig,
   type DesktopIntegrationRecord
 } from "@jev-router/adapter-codex";
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const CLI = path.join(projectRoot, "apps", "jev-cli", "dist", "index.js");
+
+function runCliSync(args: string[], env: Record<string, string>) {
+  return spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    timeout: 60_000
+  });
+}
+
+function isolatedEnv(sandbox: string): Record<string, string> {
+  return {
+    CODEX_HOME: path.join(sandbox, "codexhome"),
+    JEV_DATA_DIR: path.join(sandbox, "data"),
+    JEV_PROFILES_DIR: path.join(sandbox, "profiles"),
+    JEV_ENV_FILE: path.join(sandbox, ".env"),
+    JEV_PROXY_PORT: String(20_000 + Math.floor(Math.random() * 20_000)),
+    JEV_DECISION_PROVIDER: "rules",
+    TYPESAFE_API_KEY: "JEV-CANARY-20260928-LOCAL-ONLY",
+    APPDATA: path.join(sandbox, "appdata")
+  };
+}
 
 function makeTempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "jev-desktop-"));
@@ -250,6 +276,95 @@ describe("model catalog merge", () => {
       assert.equal(rebuilt.entryCount, 4);
       const merged = JSON.parse(readFileSync(output, "utf8")) as { models: Array<{ slug: string }> };
       assert.equal(merged.models.some((entry) => entry.slug === "mimo/mimo-v2.6-flash"), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("desktop lifecycle (isolated child process)", () => {
+  it("refuses to enable when preflight fails and changes nothing (DESK-002)", () => {
+    const sandbox = mkdtempSync(path.join(os.tmpdir(), "jev-desk-"));
+    try {
+      const codexHome = path.join(sandbox, "codexhome");
+      mkdirSync(codexHome, { recursive: true });
+      const configPath = path.join(codexHome, "config.toml");
+      const original = 'openai_base_url = "http://127.0.0.1:9/v1"\nmodel = "deepseek/deepseek-flash"\n';
+      writeFileSync(configPath, original, "utf8");
+
+      const result = runCliSync(["desktop", "enable"], isolatedEnv(sandbox));
+      assert.equal(result.status, 1, "preflight failure must refuse (exit 1)");
+      const output = JSON.parse(result.stdout) as { refused?: boolean; issues?: string[] };
+      assert.equal(output.refused, true);
+      assert.ok((output.issues?.length ?? 0) > 0, "explains what is missing");
+
+      assert.equal(readFileSync(configPath, "utf8"), original, "config untouched");
+      assert.equal(existsSync(path.join(sandbox, ".env")), false, ".env untouched");
+      const startup = path.join(
+        sandbox,
+        "appdata",
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        "Startup"
+      );
+      assert.equal(existsSync(path.join(startup, "jev-router-proxy.vbs")), false, "no autostart");
+      assert.equal(existsSync(path.join(sandbox, "data")), false, "no data dir");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("disable without an integration record reports the backup path (REC-005)", () => {
+    const sandbox = mkdtempSync(path.join(os.tmpdir(), "jev-desk-"));
+    try {
+      const codexHome = path.join(sandbox, "codexhome");
+      mkdirSync(codexHome, { recursive: true });
+      const configPath = path.join(codexHome, "config.toml");
+      const managed = [
+        'model_provider = "jev_router" # Jev-Router managed (restore: jev desktop disable)',
+        'model_catalog_json = "C:\\tmp\\catalog.json" # Jev-Router managed (restore: jev desktop disable)',
+        "",
+        "# Jev-Router managed (restore: jev desktop disable)",
+        "[model_providers.jev_router]",
+        'name = "Jev Router"',
+        'base_url = "http://127.0.0.1:10300/v1"',
+        'wire_api = "responses"',
+        "requires_openai_auth = false",
+        "supports_websockets = false",
+        ""
+      ].join("\n");
+      writeFileSync(configPath, managed, "utf8");
+
+      const result = runCliSync(["desktop", "disable"], isolatedEnv(sandbox));
+      assert.equal(result.status, 1, "incomplete state is an issue, not a silent success");
+      const output = JSON.parse(result.stdout) as { issues?: string[]; backup?: string };
+      assert.match((output.issues ?? []).join(" "), /integration record is missing/);
+      assert.match((output.issues ?? []).join(" "), /backup/);
+      assert.equal(readFileSync(configPath, "utf8"), managed, "no blind restore");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips config files under spaces and non-ASCII paths (DESK-014)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "jev 桌面 "));
+    try {
+      const inner = path.join(dir, "配置 目录");
+      mkdirSync(inner, { recursive: true });
+      const configPath = path.join(inner, "config.toml");
+      writeFileSync(configPath, ORIGINAL_CONFIG, "utf8");
+
+      const injected = await injectDesktopConfig({
+        configPath,
+        dataDirectory: dir,
+        port: 10300,
+        catalogPath: path.join(inner, "模型 目录.json")
+      });
+      assert.equal(await readRootConfigValue(configPath, "model_provider"), "jev_router");
+      await restoreDesktopConfig(configPath, injected.record);
+      assert.equal(readFileSync(configPath, "utf8"), ORIGINAL_CONFIG, "byte-identical");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
