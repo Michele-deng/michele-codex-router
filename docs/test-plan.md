@@ -43,7 +43,9 @@
 - 畸形输入、并发、崩溃恢复、磁盘满和权限异常覆盖不足。
 - 真实 OpenAI、DeepSeek、自定义中转的兼容性验证依赖人工执行。
 - 30 任务、四策略质量评测尚未执行，会产生真实模型费用。
-- CI 虽在 Ubuntu + Node 20/24 上运行，但没有 Windows 测试矩阵。
+- 2026-09-28 二轮更新：108 个自动化用例 / 27 套件全绿（新增 32 个矩阵用例，
+  含 CLI/MCP 子进程系统测试）；CI 已加 **Windows Node 24 矩阵**（Ubuntu 20/24 +
+  Windows 24 三平台，公开仓库 Actions 免费）。
 
 ## 3. 测试目标
 
@@ -528,40 +530,67 @@
 
 | 字段 | 记录 |
 | --- | --- |
-| 版本/提交 SHA |  |
-| 执行日期 |  |
-| 执行人 |  |
-| Windows/Node/Codex 版本 |  |
-| 环境编号 |  |
-| 测试阶段 |  |
-| 用例总数/通过/失败/跳过 |  |
-| P0/P1/P2 通过率 |  |
-| 缺陷链接 |  |
-| CI 或命令证据链接 |  |
-| 结论 | 通过 / 有条件通过 / 不通过 |
+| 版本/提交 SHA | v0.2.1；自动化基线 5634f3a（本轮 b884ba9 → 5634f3a） |
+| 执行日期 | 2026-09-28 |
+| 执行人 | Codex 助手（mimo-v2.6-flash），用户 Windows 本机 |
+| Windows/Node/Codex 版本 | Windows 11 家庭版 26200 / Node v24.19.0（矩阵另含 v20）/ codex-cli 0.158.0-alpha.2.1 |
+| 环境编号 | E0-CI、E1-Win、E2-E2E |
+| 测试阶段 | 阶段 1、2、3 已执行；阶段 4、5 未执行（见 12.4） |
+| 用例总数/通过/失败/跳过 | 自动化 108/108/0/0（27 套件，约 5.6 秒）；矩阵人工 Skipped 见 12.2；待人工 2 项（E2E-007/008） |
+| P0/P1/P2 通过率 | 自动化范围 100%；矩阵逐组结论见 12.2 |
+| 缺陷链接 | 本轮 4 条：PROF-005、SEC-009（修复 b884ba9）；健康文件写竞态、CI 环境依赖（7f4d3a4、5634f3a）；SSE 100ms 阈值 flake（7bc8a35，已 500ms+相对断言加固） |
+| CI 或命令证据链接 | 三平台绿 run 36375678824（https://github.com/Michele-deng/michele-codex-router/actions/runs/36375678824）；v0.2.0 tag 重跑绿 36314136799 |
+| 结论 | 有条件通过（剩余为阶段 4/5、2 项人工与 12.2 标注的 Skipped） |
 
 ### 12.2 用例结果
 
-| 用例 | 优先级 | 结果 | 耗时 | 执行版本 | 证据 | 缺陷 |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  | Pass / Fail / Blocked / Skipped |  |  |  |  |
+| 用例组 | 优先级 | 结果 | 执行版本 | 证据（测试名内含用例编号） |
+| --- | --- | --- | --- | --- |
+| GATE-001~005 | P0/P1 | Pass 5/5 | 5634f3a | npm ci / typecheck / test(108) 全 0 退出；双扫描 0 命中；git status 仅预期变更 |
+| ROUTE-001~016 | P0/P1 | Pass 16/16 | 5634f3a | route-engine.test、rules.test（含 ROUTE-005/009/012/013/015/016） |
+| TURN-001~009 | P0/P1 | Pass 8、Skipped 1 | 5634f3a | proxy.test（并发会话、TTL、断连、粘性）；TURN-008 未构造"手动模型不支持 tools"场景 |
+| FAIL-001~016 | P0/P1 | Pass（状态码分类 16 项单元全覆盖；全链路切换实测 429/400/超时/缺 provider/3 次上限） | 5634f3a | health.test、proxy.test；401/402/403 为分类级覆盖 |
+| STREAM-001~008 | P0/P1 | Pass 7、Skipped 1 | 5634f3a | proxy.test（首块/长流/头超时/断连/断流/空 body/404）；STREAM-006 代理级非流式未单测 |
+| CFG-001~006、PROF-001~005 | P0/P1 | Pass 8、Skipped 3 | 5634f3a | config.test、desktop.test、E2E-003 档案幂等；Skipped：CFG-006（无行为分支）、PROF-002/004（校验负例） |
+| PROV-001~008 | P0/P1 | Pass 8/8 | 5634f3a | proxy.test、deepseek.test、wiring.test |
+| CLI-001~010 | P0/P1 | Pass 10/10 | 5634f3a | cli.test（子进程+隔离环境+canary；错误 Key 的真实 401 以 9/26 真实记录佐证） |
+| MCP-001~005 | P0/P1 | Pass 5/5 | 5634f3a | mcp.test（JSON-RPC 九步往返，错误后服务存活） |
+| DESK-001~016 | P0/P1 | Pass 11、Skipped 5 | 5634f3a | desktop.test（注入/还原/迁移/路径）、E2E-001~011；Skipped：008/009/010/012/016 |
+| SEC-001~010 | P0/P1 | Pass 8、Skipped 2 | 5634f3a | canary 贯穿 CLI/MCP/日志、回环绑定、CI 扫描；Skipped：007/008 |
+| REC-001~009 | P0/P1 | Pass 6、Skipped 3 | 5634f3a | recovery.test、health.test、disable 记录缺失指引；Skipped：004/006/007 |
+| PERF-001~006 | P1/P2 | Skipped 6 | — | 阶段 4 待执行（需固定机器与预热窗口） |
+| §7.14 质量评测（L6） | P1 | Skipped | — | 120 次真实调用，费用未审批 |
+| E2E-001 | P0 | Pass | 5634f3a | health：ok=true、issues=[] |
+| E2E-002 | P0 | Pass | 5634f3a | doctor：ok=true、wiring=config.toml openai_base_url、models=31、warnings=[] |
+| E2E-003 | P0 | Pass | 5634f3a | enable：ok=true、profiles generated:0（PROF-005 幂等实证）、autostart+proxy 就绪 |
+| E2E-004 | P0 | Pass | 5634f3a | status：ok=true、issues=[] |
+| E2E-005 | P0 | Pass | 5634f3a | codex exec -m jev/auto → E2E-005-OK；决策 +1（Jev 选 gpt-5.5，conf0.16，providerId=passthrough）；3,854 tokens；8.3s |
+| E2E-006 | P0 | Pass | 5634f3a | 工具循环读文件返回 marker；决策 +1（循环内 0 次重复决策）；4,305 tokens；8.9s |
+| E2E-007 | P0 | Blocked-Pending 人工 | — | /model 菜单点选暂停路由（唯一待人工项） |
+| E2E-008 | P0 | Blocked-Pending 人工 | — | /model 切回 Jev Auto 恢复路由 |
+| E2E-009 | P0 | Pass（Mock 边界） | 5634f3a | FAIL 组自动化实测切换/上限/诊断；未伪造真实故障，符合 §7.13 规则 |
+| E2E-010 | P0 | Pass | 5634f3a | disable：服务停止、启动项移除、三键还原、issues=[] |
+| E2E-011 | P0 | Pass | 5634f3a | B/A/B 哈希：H0=6CFC1B7F…= 重启用后哈希；A1=A2=B2A9AF7F…；auth.json（9/23）未变 |
+| E2E-012 | P0 | Pass | 5634f3a | decisions/latest/service-log/model-health 四文件扫描 0 命中（canary/sk-/个人路径/Bearer） |
 
 ### 12.3 真实调用费用
 
 | 阶段 | 请求数 | 输入/输出 token | 估算成本 | 预算 | 审批人 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |
+| 阶段 1 静态门禁 | 0 | 0 | 0 | 0 | — | 全本地命令 |
+| 阶段 2 无费用功能测试 | 0 | 0 | 0 | 0 | — | Mock/子进程，零外呼 |
+| 阶段 3 真实冒烟（E2E-005/006） | Codex 2 次 | 8,159（Codex 统计口径） | Codex 账号额度，无单列现金 | 用户批准的阶段 1-3 范围 | 用户（对话批准 2026-09-28） | 另含 Jev 决策 2 次（PackyCode 按次计费，费率以账单为准）；执行经 opencodex 通道计入 Codex 额度 |
 
 ### 12.4 发布结论
 
 | 字段 | 记录 |
 | --- | --- |
-| 是否满足第 11 节 |  |
-| 未通过项 |  |
-| 已批准豁免 |  |
-| 遗留风险 |  |
-| 下一次回归日期 |  |
-| 发布负责人签字 |  |
+| 是否满足第 11 节 | 有条件满足：第 1-9 条满足；第 10 条（质量评测）未执行 |
+| 未通过项 | 无 Fail；待执行：阶段 4 PERF-001~006、阶段 5/L6 评测、E2E-007/008 人工、12.2 标注的 Skipped 项 |
+| 已批准豁免 | 用户批准本轮范围=阶段 1-3（2026-09-28 对话）；Skipped 项按 §4.2 进入后续计划，不默认阻断 |
+| 遗留风险 | 长跑性能与并发未测；真实兼容性仅覆盖本机 opencodex 通道；质量收益未验证；SSE 阈值已加固但跨负载稳定性以 CI 连续绿为准 |
+| 下一次回归日期 | 每次发布候选；公开推广前必须完成阶段 4、5 |
+| 发布负责人签字 | 待用户签署 |
 
 ## 13. 需求与用例追踪
 
