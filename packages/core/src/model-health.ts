@@ -165,6 +165,11 @@ export class ModelHealthStore {
     }
   }
 
+  /** Await queued persistence writes (tests and orderly shutdown use this). */
+  async flush(): Promise<void> {
+    await this.writeQueue;
+  }
+
   recordFailure(profile: CapabilityProfile, failure: ExecutionFailure, now = Date.now()): ModelHealthRecord {
     const providerId = profile.providerId ?? "openai";
     const key = ModelHealthStore.key(providerId, profile.modelId);

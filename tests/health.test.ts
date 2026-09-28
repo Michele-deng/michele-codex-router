@@ -10,6 +10,18 @@ import {
 } from "@jev-router/core";
 import { profile } from "./fixtures.js";
 
+async function eventually(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs = 4_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await check()) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe("failure classification", () => {
   it("classifies the technical statuses from the first-version plan", () => {
     assert.equal(classifyHttpFailure(401).kind, "auth");
@@ -129,10 +141,17 @@ describe("ModelHealthStore", () => {
       const store = new ModelHealthStore(directory);
       for (let i = 0; i < 3; i += 1) store.recordFailure(modelA, failure, 1_000 + i);
       for (let i = 0; i < 3; i += 1) store.recordFailure(modelB, failure, 2_000 + i);
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await store.flush();
 
       const restored = new ModelHealthStore(directory);
-      await restored.load();
+      assert.equal(
+        await eventually(async () => {
+          await restored.load();
+          return restored.isPermanentlyDisabled(modelA);
+        }),
+        true,
+        "recorded failures reach the disk"
+      );
       assert.equal(restored.isPermanentlyDisabled(modelA), true);
       assert.equal(restored.isPermanentlyDisabled(modelB), true);
 
@@ -140,10 +159,17 @@ describe("ModelHealthStore", () => {
       assert.equal(restored.isPermanentlyDisabled(modelA), false);
       assert.equal(restored.isPermanentlyDisabled(modelB), true);
       assert.equal(restored.reset(), 1);
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await restored.flush();
 
       const third = new ModelHealthStore(directory);
-      await third.load();
+      assert.equal(
+        await eventually(async () => {
+          await third.load();
+          return third.snapshot().length === 0;
+        }),
+        true,
+        "reset persists"
+      );
       assert.equal(third.snapshot().length, 0);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -168,17 +194,29 @@ describe("ModelHealthStore", () => {
       const model = profile("hot-model", "medium");
       const failure = classifyHttpFailure(400, "model not supported");
       for (let i = 0; i < 3; i += 1) service.recordFailure(model, failure, 1_000 + i);
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      await service.syncFromDisk();
-      assert.equal(service.isPermanentlyDisabled(model), true);
+      await service.flush();
+      assert.equal(
+        await eventually(async () => {
+          await service.syncFromDisk();
+          return service.isPermanentlyDisabled(model);
+        }),
+        true,
+        "service observes the permanent record"
+      );
 
       const cli = new ModelHealthStore(directory);
       await cli.load();
       assert.equal(cli.reset(), 1);
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await cli.flush();
 
-      await service.syncFromDisk();
-      assert.equal(service.isPermanentlyDisabled(model), false, "reset applies to the running service");
+      assert.equal(
+        await eventually(async () => {
+          await service.syncFromDisk();
+          return !service.isPermanentlyDisabled(model);
+        }),
+        true,
+        "reset applies to the running service"
+      );
       assert.equal(service.isCoolingDown(model), false);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -218,12 +256,15 @@ describe("ModelHealthStore", () => {
     try {
       const store = new ModelHealthStore(directory);
       store.recordFailure(profile("m", "low"), classifyHttpFailure(500), 7_000);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const raw = readFileSync(path.join(directory, "model-health.json"), "utf8");
-      assert.equal(raw.includes("server_error"), true);
-
       const restored = new ModelHealthStore(directory);
-      await restored.load();
+      assert.equal(
+        await eventually(async () => {
+          await restored.load();
+          return restored.get("openai", "m")?.failureKind === "server_error";
+        }),
+        true,
+        "record becomes visible on disk"
+      );
       assert.equal(restored.get("openai", "m")?.failureKind, "server_error");
     } finally {
       rmSync(directory, { recursive: true, force: true });
