@@ -125,6 +125,7 @@ function extractErrorMessage(bodyText: string): string | undefined {
 export class ModelHealthStore {
   private readonly records = new Map<string, ModelHealthRecord>();
   private loadedMtimeMs = 0;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly directory?: string) {}
 
@@ -256,17 +257,22 @@ export class ModelHealthStore {
     return [...this.records.values()].map((record) => ({ ...record }));
   }
 
-  private async persist(): Promise<void> {
-    if (!this.directory) return;
-    try {
-      await mkdir(this.directory, { recursive: true });
-      await writeFile(this.healthPath, JSON.stringify(this.snapshot(), null, 2), {
-        encoding: "utf8",
-        mode: 0o600
+  private persist(): Promise<void> {
+    if (!this.directory) return Promise.resolve();
+    // Serialize writes: overlapping recordFailure calls used to race and could
+    // leave stale (or half-written) state on disk, defeating health-reset.
+    this.writeQueue = this.writeQueue
+      .then(async () => {
+        await mkdir(this.directory as string, { recursive: true });
+        await writeFile(this.healthPath, JSON.stringify(this.snapshot(), null, 2), {
+          encoding: "utf8",
+          mode: 0o600
+        });
+      })
+      .catch(() => {
+        // Health persistence is best effort; routing must not fail because of it.
       });
-    } catch {
-      // Health persistence is best effort; routing must not fail because of it.
-    }
+    return this.writeQueue;
   }
 
   private get healthPath(): string {

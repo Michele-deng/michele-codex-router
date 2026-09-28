@@ -45,6 +45,9 @@ function makeSandbox(): Sandbox {
       JEV_PROXY_PORT: String(20_000 + Math.floor(Math.random() * 20_000)),
       JEV_DECISION_PROVIDER: "rules",
       TYPESAFE_API_KEY: CANARY,
+      // CI images have no Codex binary; point the health probe at the Node
+      // executable so the codex-presence check stays deterministic.
+      JEV_CODEX_BIN: process.execPath,
       APPDATA: path.join(root, "appdata")
     }
   };
